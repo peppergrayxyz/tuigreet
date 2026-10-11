@@ -5,7 +5,7 @@ use std::{
   io::{self, BufRead, BufReader},
   path::{Path, PathBuf},
   process::Command,
-  sync::OnceLock,
+  sync::{Mutex, OnceLock, PoisonError},
 };
 
 use chrono::Local;
@@ -35,6 +35,7 @@ const DEFAULT_MAX_UID: u32 = 60000;
 static XDG_DATA_DIRS: OnceLock<Vec<PathBuf>> = OnceLock::new();
 static DEFAULT_SESSION_PATHS: OnceLock<Vec<(PathBuf, SessionType)>> =
   OnceLock::new();
+static USER_ENUMERATION: Mutex<()> = Mutex::new(());
 
 fn xdg_data_dirs() -> &'static Vec<PathBuf> {
   XDG_DATA_DIRS.get_or_init(|| {
@@ -223,12 +224,20 @@ pub fn delete_last_user_command(username: &str) {
   let _ = fs::remove_file(format!("{LAST_COMMAND}-{username}"));
 }
 
+#[expect(
+  unsafe_code,
+  reason = "enumerating libc's passwd database requires unsafe FFI"
+)]
 pub fn get_users(min_uid: u32, max_uid: u32) -> Vec<User> {
-  // SAFETY: `uzers` documents this enumeration as unsafe because it consults
-  // libc account databases; we only consume its returned iterator here.
+  let enumeration = USER_ENUMERATION
+    .lock()
+    .unwrap_or_else(PoisonError::into_inner);
+  // SAFETY: this is the only passwd enumeration in the program. The mutex
+  // serializes all calls and remains held until the iterator is exhausted
+  // and dropped; other account lookups use uzers' reentrant APIs.
   let users = unsafe { uzers::all_users() };
 
-  users
+  let result = users
     .filter(|user| user.uid() >= min_uid && user.uid() <= max_uid)
     .map(|user| {
       User {
@@ -246,7 +255,9 @@ pub fn get_users(min_uid: u32, max_uid: u32) -> Vec<User> {
         },
       }
     })
-    .collect()
+    .collect();
+  drop(enumeration);
+  result
 }
 
 pub fn get_min_max_uids(

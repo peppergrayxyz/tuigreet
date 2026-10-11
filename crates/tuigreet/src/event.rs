@@ -8,10 +8,13 @@ use std::{
 
 #[cfg(not(test))] use crossterm::event::EventStream;
 use crossterm::event::{Event as TermEvent, KeyEvent};
+#[cfg(test)] use futures::stream;
 use futures::{StreamExt, future::FutureExt};
 use tokio::{
   process::Command,
   sync::mpsc::{self, Sender},
+  task,
+  time::interval,
 };
 use tuigreet_types::AuthStatus;
 
@@ -60,7 +63,7 @@ fn frame_interval(fps: f64) -> Duration {
 
 impl Events {
   /// Create a new event stream with keyboard and render events
-  pub async fn new() -> Self {
+  pub fn new() -> Self {
     let (tx, rx) = mpsc::channel(10);
     let frame_rate = Arc::new(AtomicU64::new(DEFAULT_FRAME_RATE.to_bits()));
 
@@ -73,9 +76,9 @@ impl Events {
   /// Creating it earlier can make crossterm's reader panic before it has a
   /// source, leaving the UI without render events.
   pub fn start(&self) {
-    tokio::task::spawn({
+    task::spawn({
       let tx = self.tx.clone();
-      let frame_rate = self.frame_rate.clone();
+      let frame_rate = Arc::clone(&self.frame_rate);
 
       async move {
         #[cfg(not(test))]
@@ -83,19 +86,17 @@ impl Events {
 
         // Dummy stream for tests
         #[cfg(test)]
-        let mut stream = futures::stream::pending::<Result<TermEvent, ()>>();
+        let mut stream = stream::pending::<Result<TermEvent, ()>>();
 
         let mut current_fps = load_frame_rate(&frame_rate);
-        let mut render_interval =
-          tokio::time::interval(frame_interval(current_fps));
+        let mut render_interval = interval(frame_interval(current_fps));
 
         loop {
           // Pick up fps changes between iterations
           let target = load_frame_rate(&frame_rate);
-          if target != current_fps {
+          if target.to_bits() != current_fps.to_bits() {
             current_fps = target;
-            render_interval =
-              tokio::time::interval(frame_interval(current_fps));
+            render_interval = interval(frame_interval(current_fps));
             render_interval.tick().await;
           }
 

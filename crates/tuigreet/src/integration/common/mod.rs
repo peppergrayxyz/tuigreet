@@ -62,7 +62,7 @@ impl IntegrationRunner {
     let socket = NamedTempFile::new().unwrap().into_temp_path().to_path_buf();
 
     let (backend, buffer, tick) = TestBackend::new(size.0, size.1);
-    let events = Events::new().await;
+    let events = Events::new();
     let sender = events.sender();
 
     let server = tokio::task::spawn({

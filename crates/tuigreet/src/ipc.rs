@@ -10,7 +10,7 @@ use greetd_ipc::{
 use tokio::sync::{
   Mutex,
   RwLock,
-  mpsc::{Receiver, Sender},
+  mpsc::{self, Receiver, Sender},
 };
 use tuigreet_types::{AuthStatus, Mode};
 
@@ -41,7 +41,7 @@ pub struct IpcHandle {
 impl Ipc {
   /// Create a new IPC client.
   pub fn new() -> Self {
-    let (tx, rx) = tokio::sync::mpsc::channel::<Request>(10);
+    let (tx, rx) = mpsc::channel::<Request>(10);
 
     Self(Arc::new(IpcHandle {
       tx: RwLock::new(tx),
@@ -63,7 +63,7 @@ impl Ipc {
   }
 
   /// Receive next request from the queue.
-  pub async fn next(&mut self) -> Option<Request> {
+  pub async fn next(&self) -> Option<Request> {
     self.0.rx.lock().await.recv().await
   }
 
@@ -71,7 +71,7 @@ impl Ipc {
   ///
   /// Processes authentication flow and session management.
   pub async fn handle(
-    &mut self,
+    &self,
     greeter: Arc<RwLock<Greeter>>,
   ) -> Result<(), Box<dyn Error>> {
     let request = self.next().await;
@@ -106,7 +106,7 @@ impl Ipc {
   }
 
   async fn parse_response(
-    &mut self,
+    &self,
     greeter: &mut Greeter,
     response: Response,
   ) -> Result<(), Box<dyn Error>> {
@@ -295,16 +295,12 @@ impl Ipc {
     Ok(())
   }
 
-  pub async fn cancel(greeter: &mut Greeter) {
+  pub async fn cancel(greeter: &Greeter) {
     tracing::info!("cancelling session");
 
-    if greeter.stream.is_none() {
-      return;
+    if let Ok(mut stream) = greeter.stream().await {
+      let _ = Request::CancelSession.write_to(&mut *stream).await;
     }
-
-    let _ = Request::CancelSession
-      .write_to(&mut *greeter.stream().await)
-      .await;
   }
 }
 

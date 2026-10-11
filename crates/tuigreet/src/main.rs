@@ -148,13 +148,13 @@ where
     }
   };
 
-  tokio::task::spawn({
-    let greeter = greeter.clone();
-    let mut ipc = ipc.clone();
+  task::spawn({
+    let greeter = Arc::clone(&greeter);
+    let ipc = ipc.clone();
 
     async move {
       loop {
-        let _ = ipc.handle(greeter.clone()).await;
+        let _ = ipc.handle(Arc::clone(&greeter)).await;
       }
     }
   });

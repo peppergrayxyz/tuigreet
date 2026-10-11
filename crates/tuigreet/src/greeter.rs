@@ -515,13 +515,18 @@ impl Greeter {
       .expect("config accessed before parse_options")
   }
 
-  pub async fn stream(&self) -> RwLockWriteGuard<'_, UnixStream> {
-    self
-      .stream
-      .as_ref()
-      .expect("stream accessed before connect")
-      .write()
-      .await
+  /// Borrow the connected greetd socket for writing.
+  ///
+  /// # Errors
+  /// Returns `NotConnected` when no greetd connection has been established.
+  pub async fn stream(&self) -> io::Result<RwLockWriteGuard<'_, UnixStream>> {
+    let stream = self.stream.as_ref().ok_or_else(|| {
+      io::Error::new(
+        io::ErrorKind::NotConnected,
+        "greetd socket is not connected",
+      )
+    })?;
+    Ok(stream.write().await)
   }
 
   #[must_use]

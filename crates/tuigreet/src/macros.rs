@@ -7,12 +7,12 @@ pub trait SafeDebug {
 impl SafeDebug for Request {
   fn safe_repr(&self) -> String {
     match self {
-      msg @ &Self::CancelSession => format!("{msg:?}"),
-      msg @ &Self::CreateSession { .. } => format!("{msg:?}"),
+      msg @ (&Self::CancelSession
+      | &Self::CreateSession { .. }
+      | &Self::StartSession { .. }) => format!("{msg:?}"),
       &Self::PostAuthMessageResponse { .. } => {
         "PostAuthMessageResponse".to_string()
       },
-      msg @ &Self::StartSession { .. } => format!("{msg:?}"),
     }
   }
 }

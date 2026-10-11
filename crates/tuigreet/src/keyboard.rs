@@ -94,7 +94,7 @@ pub async fn handle(
         },
 
         _ => {
-          Ipc::cancel(&mut greeter).await;
+          Ipc::cancel(&greeter).await;
           greeter.reset(false).await;
         },
       }
@@ -372,7 +372,7 @@ pub async fn handle(
             greeter.powers.options.get(greeter.powers.selected).cloned();
 
           if let Some(command) = power_command {
-            power(&mut greeter, command.action).await;
+            power(&greeter, command.action).await;
           }
 
           greeter.mode = greeter.previous_mode;

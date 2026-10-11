@@ -77,10 +77,16 @@ impl Doom {
     opts.height = opts.height.clamp(1, HEIGHT_MAX);
     opts.spread = opts.spread.min(4);
 
-    let seed = SystemTime::now()
-      .duration_since(UNIX_EPOCH)
-      .map(|d| d.as_nanos() as u64)
-      .unwrap_or(0);
+    let seed =
+      SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| {
+          let bytes = duration.as_nanos().to_le_bytes();
+          u64::from_le_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5],
+            bytes[6], bytes[7],
+          ])
+        });
 
     Self {
       width: 0,

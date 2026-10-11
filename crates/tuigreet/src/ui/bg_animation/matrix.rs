@@ -123,10 +123,16 @@ impl Matrix {
     opts.min_speed = opts.min_speed.max(0.05);
     opts.mutate_chance = opts.mutate_chance.clamp(0.0, 1.0);
 
-    let seed = SystemTime::now()
-      .duration_since(UNIX_EPOCH)
-      .map(|d| d.as_nanos() as u64)
-      .unwrap_or(0);
+    let seed =
+      SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| {
+          let bytes = duration.as_nanos().to_le_bytes();
+          u64::from_le_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5],
+            bytes[6], bytes[7],
+          ])
+        });
 
     Self {
       width: 0,
@@ -144,6 +150,14 @@ impl Matrix {
   }
 
   /// Pick a fresh `(length, speed)` for a respawning stream.
+  #[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss,
+    reason = "speeds are intentionally quantized to nonnegative millirow \
+              units using Rust's saturating float cast, then rounded to the \
+              animation's f32 precision"
+  )]
   fn random_stream(&mut self) -> (u16, f32) {
     let length = self
       .rng
@@ -166,12 +180,19 @@ impl Matrix {
     let cells_len = self.width as usize * self.height as usize;
     self.cells.resize(cells_len, Cell::default());
 
-    let h = self.height as i16;
+    let h = i32::from(self.height);
     for _ in 0..self.width as usize {
       let (length, speed) = self.random_stream();
       // Stagger initial heads across and above the screen so columns don't
       // all start in lockstep.
-      let head_y = self.rng.random_range(-(h as i32)..(h as i32)) as f32;
+      // Every sampled row lies within +/-u16::MAX, exactly representable by
+      // f32.
+      #[expect(
+        clippy::cast_precision_loss,
+        reason = "terminal height bounds the sampled i32 to +/-65535, within \
+                  f32's exact integer range"
+      )]
+      let head_y = self.rng.random_range(-h..h) as f32;
       self.cols.push(Column {
         head_y,
         length,
@@ -201,7 +222,7 @@ impl Animation for Matrix {
       return;
     }
     let w = self.width as usize;
-    let h = self.height as i32;
+    let h = i32::from(self.height);
 
     // Snapshot column count to avoid borrowing self.cols while we mutate
     // self.rng / self.cells inside the loop.
@@ -214,7 +235,7 @@ impl Animation for Matrix {
         if cooldown == 0 {
           let (length, speed) = self.random_stream();
           self.cols[x] = Column {
-            head_y: -(self.rng.random_range(0..(h.max(1) / 2 + 1)) as f32),
+            head_y: -f32::from(self.rng.random_range(0..(self.height / 2 + 1))),
             length,
             speed,
             active: true,
@@ -226,17 +247,31 @@ impl Animation for Matrix {
         continue;
       }
 
+      // Speeds are at most u32::MAX / 1000 rows and active heads retire at
+      // height + length, so both row coordinates remain within i32's range.
+      #[expect(
+        clippy::cast_possible_truncation,
+        reason = "floor intentionally discards sub-row position; active-head \
+                  and speed bounds prevent i32 overflow"
+      )]
       let prev_int = col.head_y.floor() as i32;
       let new_y = col.head_y + col.speed;
+      #[expect(
+        clippy::cast_possible_truncation,
+        reason = "floor intentionally discards sub-row position; active-head \
+                  and speed bounds prevent i32 overflow"
+      )]
       let new_int = new_y.floor() as i32;
 
       // Stamp a glyph at every integer row the head crossed during this
       // step (the head can advance more than one row per frame at high
       // speeds).
       for row in (prev_int + 1)..=new_int {
-        if row >= 0 && row < h {
+        if let Ok(row) = u16::try_from(row)
+          && row < self.height
+        {
           let ch = self.random_glyph();
-          let idx = row as usize * w + x;
+          let idx = usize::from(row) * w + x;
           self.cells[idx] = Cell { ch, age: 1 };
         }
       }
@@ -245,7 +280,7 @@ impl Animation for Matrix {
 
       // Once the head falls past the bottom plus the trail, the column is
       // done — go dormant for a moment then respawn.
-      if new_int >= h + col.length as i32 {
+      if new_int >= h + i32::from(col.length) {
         let cooldown = self.rng.random_range(2..=20);
         self.cols[x].active = false;
         self.cols[x].cooldown = cooldown;
@@ -268,7 +303,7 @@ impl Animation for Matrix {
           continue;
         }
         let ch = if self.opts.mutate_chance > 0.0
-          && self.rng.random_bool(self.opts.mutate_chance as f64)
+          && self.rng.random_bool(f64::from(self.opts.mutate_chance))
         {
           self.random_glyph()
         } else {

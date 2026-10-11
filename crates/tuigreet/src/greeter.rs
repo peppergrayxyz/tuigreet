@@ -1287,9 +1287,10 @@ impl Greeter {
   /// Render rate for the event loop.
   #[must_use]
   pub fn frame_rate(&self) -> f64 {
-    self
-      .animation_fps
-      .map_or(DEFAULT_FPS as f64, |fps| fps.max(DEFAULT_FPS) as f64)
+    self.animation_fps.map_or_else(
+      || f64::from(DEFAULT_FPS),
+      |fps| f64::from(fps.max(DEFAULT_FPS)),
+    )
   }
 
   /// Push the current frame rate to the event loop.

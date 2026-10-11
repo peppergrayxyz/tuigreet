@@ -299,7 +299,7 @@ pub fn get_min_max_uids(
   })
 }
 
-pub fn get_sessions(greeter: &Greeter) -> Result<Vec<Session>, Box<dyn Error>> {
+pub fn get_sessions(greeter: &Greeter) -> Vec<Session> {
   let paths = if greeter.session_paths.is_empty() {
     default_session_paths()
   } else {
@@ -331,7 +331,7 @@ pub fn get_sessions(greeter: &Greeter) -> Result<Vec<Session>, Box<dyn Error>> {
 
   tracing::info!("found {} sessions", files.len());
 
-  Ok(files)
+  files
 }
 
 fn load_desktop_file<P>(

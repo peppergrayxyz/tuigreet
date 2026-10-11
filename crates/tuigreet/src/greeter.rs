@@ -342,7 +342,7 @@ impl Greeter {
       greeter.connect().await;
     }
 
-    let mut sessions = get_sessions(&greeter).unwrap_or_default();
+    let mut sessions = get_sessions(&greeter);
 
     if greeter.mock && sessions.is_empty() {
       sessions = mock_sessions();
@@ -1460,7 +1460,7 @@ impl Greeter {
       .options
       .get(self.sessions.selected)
       .and_then(|session| session.path.clone());
-    let sessions = get_sessions(self).unwrap_or_default();
+    let sessions = get_sessions(self);
     self.sessions.options = sessions;
     self.sessions.selected = selected_path
       .as_ref()

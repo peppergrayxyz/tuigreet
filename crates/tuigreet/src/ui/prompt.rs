@@ -171,7 +171,13 @@ pub fn draw_with_area(
           let value = match (greeter.asking_for_secret, &greeter.secret_display)
           {
             (true, SecretDisplay::Character(pool)) => {
-              if pool.chars().count() == 1 {
+              let pool_length = pool.chars().count();
+              if pool_length == 0 {
+                return Err(
+                  "secret display character pool must not be empty".into(),
+                );
+              }
+              if pool_length == 1 {
                 pool.repeat(greeter.buffer.chars().count())
               } else {
                 let mut rng = StdRng::seed_from_u64(0);
@@ -180,12 +186,11 @@ pub fn draw_with_area(
                   .buffer
                   .chars()
                   .map(|_| {
-                    pool
-                      .chars()
-                      .nth(rng.random_range(0..pool.chars().count()))
-                      .unwrap()
+                    pool.chars().nth(rng.random_range(0..pool_length)).ok_or(
+                      "secret display index is outside its character pool",
+                    )
                   })
-                  .collect()
+                  .collect::<Result<String, _>>()?
               }
             },
 

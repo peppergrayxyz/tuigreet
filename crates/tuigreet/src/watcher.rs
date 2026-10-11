@@ -1,4 +1,5 @@
 use std::{
+  error::Error,
   path::{Path, PathBuf},
   sync::Arc,
   time::Duration,
@@ -12,7 +13,10 @@ use notify::{
   RecursiveMode,
   Watcher,
 };
-use tokio::sync::{RwLock, mpsc};
+use tokio::{
+  sync::{RwLock, mpsc},
+  time::sleep,
+};
 use tracing::{debug, error, info, warn};
 use tuigreet_config::{Config, parser::load_config};
 
@@ -22,13 +26,10 @@ use crate::{Greeter, event::Event as GreeterEvent};
 ///
 /// Keeps the watcher alive for the lifetime of the struct.
 /// Dropping this struct will stop file watching.
-#[allow(dead_code)]
 pub struct ConfigWatcher {
-  #[allow(dead_code)]
-  watcher: RecommendedWatcher,
+  _watcher: RecommendedWatcher,
 }
 
-#[allow(dead_code)]
 impl ConfigWatcher {
   /// Create a new config file watcher.
   ///
@@ -47,7 +48,7 @@ impl ConfigWatcher {
     config_path: Option<PathBuf>,
     greeter: Arc<RwLock<Greeter>>,
     event_sender: mpsc::Sender<GreeterEvent>,
-  ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+  ) -> Result<Self, Box<dyn Error + Send + Sync>> {
     let (tx, mut rx) = mpsc::channel::<Result<Event, notify::Error>>(100);
 
     // Create the file watcher
@@ -61,22 +62,15 @@ impl ConfigWatcher {
     )?;
 
     // Determine which config file to watch
-    let watch_path = if let Some(ref path) = config_path {
-      path.clone()
-    } else {
-      // Use XDG config path
-      if let Some(config_dir) = dirs::config_dir() {
-        let user_config = config_dir.join("tuigreet").join("config.toml");
-        if user_config.exists() {
-          user_config
-        } else {
-          // Fall back to system config
-          PathBuf::from("/etc/tuigreet/config.toml")
-        }
-      } else {
-        PathBuf::from("/etc/tuigreet/config.toml")
-      }
-    };
+    let watch_path = config_path.as_ref().map_or_else(
+      || {
+        dirs::config_dir()
+          .map(|dir| dir.join("tuigreet").join("config.toml"))
+          .filter(|path| path.exists())
+          .unwrap_or_else(|| PathBuf::from("/etc/tuigreet/config.toml"))
+      },
+      Clone::clone,
+    );
 
     // Only watch if the config file exists
     if watch_path.exists() {
@@ -103,7 +97,7 @@ impl ConfigWatcher {
               debug!("Config file change detected: {:?}", event);
 
               // Add a small delay to avoid partial writes
-              tokio::time::sleep(Duration::from_millis(100)).await;
+              sleep(Duration::from_millis(100)).await;
 
               let new_config = {
                 let greeter_guard = greeter.read().await;
@@ -142,7 +136,7 @@ impl ConfigWatcher {
       }
     });
 
-    Ok(Self { watcher })
+    Ok(Self { _watcher: watcher })
   }
 
   fn is_config_event(event: &Event, config_path: &Path) -> bool {
@@ -157,7 +151,7 @@ impl ConfigWatcher {
   fn reload_config(
     cli_config_path: Option<&Path>,
     cli_matches: Option<&getopts::Matches>,
-  ) -> Result<Config, Box<dyn std::error::Error + Send + Sync>> {
+  ) -> Result<Config, Box<dyn Error + Send + Sync>> {
     debug!("Reloading configuration");
 
     let config = load_config(cli_config_path, cli_matches)?;
@@ -181,7 +175,7 @@ impl ConfigWatcher {
   async fn apply_config_to_greeter(
     greeter: &Arc<RwLock<Greeter>>,
     config: Config,
-  ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+  ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut greeter_guard = greeter.write().await;
 
     // A tracing subscriber is installed once at startup and cannot be safely
@@ -206,6 +200,7 @@ impl ConfigWatcher {
 
     // Store the new config
     greeter_guard.loaded_config = Some(config);
+    drop(greeter_guard);
 
     info!("Config hot reload completed successfully");
     Ok(())

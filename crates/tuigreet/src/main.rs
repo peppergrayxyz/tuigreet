@@ -8,12 +8,13 @@ mod ipc;
 mod keyboard;
 mod power;
 mod ui;
-mod watcher;
+#[cfg(not(test))] mod watcher;
 
 #[cfg(test)] mod integration;
 
 #[cfg(not(test))] use std::mem;
-use std::{error::Error, io, process, sync::Arc};
+#[cfg(not(test))] use std::path::PathBuf;
+use std::{error::Error, io, panic, process, sync::Arc};
 
 #[cfg(not(test))]
 use crossterm::terminal::{
@@ -30,12 +31,19 @@ use crossterm::{
 use event::Event;
 use greetd_ipc::Request;
 use power::PowerPostAction;
-use tokio::sync::RwLock;
-use tui::{Terminal, backend::CrosstermBackend};
+use tokio::{sync::RwLock, task};
+#[cfg(not(test))]
+use tracing_appender::{non_blocking, non_blocking::WorkerGuard};
+#[cfg(not(test))] use tracing_subscriber::fmt;
+use tui::{
+  Terminal,
+  backend::{Backend, CrosstermBackend},
+};
 use tuigreet_types::AuthStatus;
 
 pub use self::greeter::*;
-use self::{event::Events, ipc::Ipc};
+#[cfg(not(test))] use self::watcher::ConfigWatcher;
+use self::{event::Events, ipc::Ipc, ui::common::masked::MaskedString};
 
 #[tokio::main]
 async fn main() {
@@ -62,7 +70,7 @@ async fn run<B>(
   mut events: Events,
 ) -> Result<(), Box<dyn Error>>
 where
-  B: tui::backend::Backend,
+  B: Backend,
   B::Error: 'static,
 {
   tracing::info!("tuigreet started");
@@ -110,8 +118,7 @@ where
   {
     tracing::info!("auto-selecting sole eligible user: {}", user.username);
 
-    greeter.username =
-      crate::ui::common::masked::MaskedString::from(user.username, user.name);
+    greeter.username = MaskedString::from(user.username, user.name);
     greeter.working = true;
 
     ipc
@@ -128,17 +135,11 @@ where
   let _config_watcher = {
     let config_path = {
       let greeter_guard = greeter.read().await;
-      greeter_guard
-        .config()
-        .opt_str("config")
-        .map(std::path::PathBuf::from)
+      greeter_guard.config().opt_str("config").map(PathBuf::from)
     };
 
-    match crate::watcher::ConfigWatcher::new(
-      config_path,
-      greeter.clone(),
-      events.sender(),
-    ) {
+    match ConfigWatcher::new(config_path, Arc::clone(&greeter), events.sender())
+    {
       Ok(watcher) => Some(watcher),
       Err(e) => {
         tracing::warn!("Failed to initialize config watcher: {}", e);
@@ -159,7 +160,8 @@ where
   });
 
   loop {
-    if let Some(status) = greeter.read().await.exit {
+    let exit_status = greeter.read().await.exit;
+    if let Some(status) = exit_status {
       tracing::info!("exiting main loop");
 
       // Skip `Terminal`'s `Drop`, it would re-emit `\x1b[?25h` whenever the
@@ -172,9 +174,11 @@ where
     }
 
     match events.next().await {
-      Some(Event::Render) => ui::draw(greeter.clone(), &mut terminal).await?,
+      Some(Event::Render) => {
+        ui::draw(Arc::clone(&greeter), &mut terminal).await?;
+      },
       Some(Event::Key(key)) => {
-        keyboard::handle(greeter.clone(), key, ipc.clone()).await?;
+        keyboard::handle(Arc::clone(&greeter), key, ipc.clone()).await?;
       },
 
       Some(Event::Exit(status)) => {
@@ -202,7 +206,7 @@ where
 
       Some(Event::Refresh) => {
         // Config was hot reloaded, force a render
-        ui::draw(greeter.clone(), &mut terminal).await?;
+        ui::draw(Arc::clone(&greeter), &mut terminal).await?;
       },
 
       Some(Event::SetFrameRate(fps)) => events.set_frame_rate(fps),
@@ -253,9 +257,9 @@ fn enable_numlock() {
 }
 
 fn register_panic_handler() {
-  let hook = std::panic::take_hook();
+  let hook = panic::take_hook();
 
-  std::panic::set_hook(Box::new(move |info| {
+  panic::set_hook(Box::new(move |info| {
     #[cfg(not(test))]
     clear_screen();
 
@@ -276,9 +280,7 @@ pub fn clear_screen() {
 }
 
 #[cfg(not(test))]
-fn init_logger(
-  greeter: &Greeter,
-) -> Option<tracing_appender::non_blocking::WorkerGuard> {
+fn init_logger(greeter: &Greeter) -> Option<WorkerGuard> {
   use std::fs::OpenOptions;
 
   use tracing_subscriber::{
@@ -294,15 +296,11 @@ fn init_logger(
 
   match (greeter.debug, logfile.open(&greeter.logfile)) {
     (true, Ok(file)) => {
-      let (appender, guard) = tracing_appender::non_blocking(file);
+      let (appender, guard) = non_blocking(file);
       let target = Targets::new().with_target("tuigreet", LevelFilter::DEBUG);
 
       tracing_subscriber::registry()
-        .with(
-          tracing_subscriber::fmt::layer()
-            .with_writer(appender)
-            .with_line_number(true),
-        )
+        .with(fmt::layer().with_writer(appender).with_line_number(true))
         .with(target)
         .init();
 

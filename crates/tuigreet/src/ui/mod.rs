@@ -383,6 +383,7 @@ where
       f.set_cursor_position((cursor.0 - 1, cursor.1 - 1));
     }
   })?;
+  drop(greeter);
 
   io::stdout().flush()?;
 

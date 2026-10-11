@@ -234,12 +234,20 @@ async fn exit(greeter: &mut Greeter, status: AuthStatus) {
 use nix::{ioctl_read_bad, ioctl_write_int_bad};
 ioctl_read_bad!(get_keyboard_flags, 0x4B64, u8);
 ioctl_write_int_bad!(set_keyboard_flags, 0x4B65);
+#[expect(
+  unsafe_code,
+  reason = "Linux keyboard ioctls require an unsafe FFI call"
+)]
 fn enable_numlock() {
+  // SAFETY: KDGKBLED writes one byte into the live flags value. KDSKBLED
+  // takes an integer value, not a pointer. fd 0 is only queried here; errors
+  // (including stdin not being a Linux console) are handled without
+  // dereferencing it.
   unsafe {
     let mut flags: u8 = 0;
-    if get_keyboard_flags(0, &mut flags).is_ok() {
+    if get_keyboard_flags(0, &raw mut flags).is_ok() {
       flags |= 0x22;
-      let _ = set_keyboard_flags(0, flags as i32);
+      let _ = set_keyboard_flags(0, i32::from(flags));
     }
   }
 }

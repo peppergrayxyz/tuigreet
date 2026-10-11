@@ -30,12 +30,17 @@ mod ffi {
 
   #[repr(C)]
   pub struct WinSize {
-    pub ws_row:    u16,
-    pub ws_col:    u16,
-    pub ws_xpixel: u16,
-    pub ws_ypixel: u16,
+    pub rows:   u16,
+    pub cols:   u16,
+    pub xpixel: u16,
+    pub ypixel: u16,
   }
 
+  #[expect(
+    unsafe_code,
+    reason = "Linux terminal sizing requires the ioctl C ABI; calls are \
+              audited at their call sites."
+  )]
   unsafe extern "C" {
     pub fn ioctl(fd: c_int, request: c_ulong, arg: *mut WinSize) -> c_int;
   }
@@ -265,7 +270,7 @@ fn resize_terminal_to_resolution(
 ) {
   use std::os::unix::io::AsRawFd;
 
-  let fd = std::io::stdout().as_raw_fd();
+  let fd = io::stdout().as_raw_fd();
 
   let Some((cur_rows, cur_cols, cur_xpixel, cur_ypixel)) = get_winsize(fd)
   else {
@@ -339,20 +344,25 @@ fn apply_winsize(rows: u16, cols: u16, xpixel: u16, ypixel: u16) {
 
   use ffi::{TIOCSWINSZ, WinSize, ioctl};
 
-  let fd = std::io::stdout().as_raw_fd();
-  // SAFETY: `ws` is a valid, initialized `repr(C)` buffer for the duration of
-  // this call, and `fd` is borrowed from the live stdout handle.
-  unsafe {
-    let mut ws = WinSize {
-      ws_row:    rows,
-      ws_col:    cols,
-      ws_xpixel: xpixel,
-      ws_ypixel: ypixel,
-    };
-    let ret = ioctl(fd, TIOCSWINSZ, &raw mut ws);
-    if ret != 0 {
-      tracing::warn!("TIOCSWINSZ failed: {}", std::io::Error::last_os_error());
-    }
+  let stdout = io::stdout();
+  let fd = stdout.as_raw_fd();
+  let mut ws = WinSize {
+    rows,
+    cols,
+    xpixel,
+    ypixel,
+  };
+  #[expect(
+    unsafe_code,
+    reason = "The terminal window-size ioctl requires an FFI call with an \
+              audited buffer."
+  )]
+  // SAFETY: `ws` has the Linux winsize layout and is initialized and valid for
+  // this synchronous call. TIOCSWINSZ reads that buffer without retaining it;
+  // `fd` belongs to the stdout handle, which remains live through the call.
+  let ret = unsafe { ioctl(fd, TIOCSWINSZ, &raw mut ws) };
+  if ret != 0 {
+    tracing::warn!("TIOCSWINSZ failed: {}", io::Error::last_os_error());
   }
 }
 
@@ -363,21 +373,25 @@ fn apply_winsize(rows: u16, cols: u16, xpixel: u16, ypixel: u16) {
 fn get_winsize(fd: i32) -> Option<(u16, u16, u16, u16)> {
   use ffi::{TIOCGWINSZ, WinSize, ioctl};
 
-  // SAFETY: `ws` is a valid, initialized `repr(C)` output buffer for the
-  // duration of this call; the caller supplies an OS file descriptor.
-  unsafe {
-    let mut ws = WinSize {
-      ws_row:    0,
-      ws_col:    0,
-      ws_xpixel: 0,
-      ws_ypixel: 0,
-    };
-    let ret = ioctl(fd, TIOCGWINSZ, &raw mut ws);
-    if ret == 0 {
-      Some((ws.ws_row, ws.ws_col, ws.ws_xpixel, ws.ws_ypixel))
-    } else {
-      None
-    }
+  let mut ws = WinSize {
+    rows:   0,
+    cols:   0,
+    xpixel: 0,
+    ypixel: 0,
+  };
+  #[expect(
+    unsafe_code,
+    reason = "The terminal window-size ioctl requires an FFI call with an \
+              audited buffer."
+  )]
+  // SAFETY: `ws` has the Linux winsize layout and is initialized and valid for
+  // this synchronous call. TIOCGWINSZ writes only that buffer and does not
+  // retain its pointer. An invalid descriptor is rejected by the kernel.
+  let ret = unsafe { ioctl(fd, TIOCGWINSZ, &raw mut ws) };
+  if ret == 0 {
+    Some((ws.rows, ws.cols, ws.xpixel, ws.ypixel))
+  } else {
+    None
   }
 }
 

@@ -26,6 +26,7 @@ use tokio::sync::RwLock;
 use tui::{
   Frame as CrosstermFrame,
   Terminal,
+  backend::Backend,
   layout::{Constraint, Direction, Layout},
   style::Modifier,
   text::{Line, Span},
@@ -49,6 +50,7 @@ const STATUSBAR_RIGHT_INDEX: usize = 3;
 
 pub type Frame<'a> = CrosstermFrame<'a>;
 
+#[derive(Clone, Copy)]
 enum Button {
   Command,
   Session,
@@ -59,15 +61,16 @@ enum Button {
 
 /// Get widget position from config
 fn get_widget_position(greeter: &Greeter, widget_name: &str) -> WidgetPosition {
-  if let Some(ref config) = greeter.loaded_config {
-    match widget_name {
-      "time" => config.layout.widgets.time_position.clone(),
-      "status" => config.layout.widgets.status_position.clone(),
-      _ => WidgetPosition::Default,
-    }
-  } else {
-    WidgetPosition::Default
-  }
+  greeter
+    .loaded_config
+    .as_ref()
+    .map_or(WidgetPosition::Default, |config| {
+      match widget_name {
+        "time" => config.layout.widgets.time_position.clone(),
+        "status" => config.layout.widgets.status_position.clone(),
+        _ => WidgetPosition::Default,
+      }
+    })
 }
 
 pub async fn draw<B>(
@@ -75,7 +78,7 @@ pub async fn draw<B>(
   terminal: &mut Terminal<B>,
 ) -> Result<(), Box<dyn Error>>
 where
-  B: tui::backend::Backend,
+  B: Backend,
   B::Error: 'static,
 {
   let mut greeter = greeter.write().await;
@@ -169,7 +172,7 @@ where
           .constraints(
             [
               Constraint::Fill(1),
-              Constraint::Length(time_text.chars().count() as u16),
+              Constraint::Length(layout_text_width(&time_text)),
               Constraint::Fill(1),
             ]
             .as_ref(),
@@ -201,14 +204,14 @@ where
         let (bat_slot, cons) = match battery_pos {
           BatteryPosition::Left => {
             (0, vec![
-              Constraint::Length(battery_text.chars().count() as u16),
+              Constraint::Length(layout_text_width(&battery_text)),
               Constraint::Fill(1),
             ])
           },
           BatteryPosition::Right => {
             (1, vec![
               Constraint::Fill(1),
-              Constraint::Length(battery_text.chars().count() as u16),
+              Constraint::Length(layout_text_width(&battery_text)),
             ])
           },
         };
@@ -236,7 +239,7 @@ where
           [
             Constraint::Length(greeter.window_padding()),
             Constraint::Fill(1),
-            Constraint::Length(time_text.chars().count() as u16),
+            Constraint::Length(layout_text_width(&time_text)),
             Constraint::Fill(1),
             Constraint::Length(greeter.window_padding()),
           ]
@@ -252,7 +255,7 @@ where
 
     // Render status bar if not hidden
     if let Some(slot) = status_slot {
-      let status_block_size_right = fl!("status_caps").chars().count() as u16;
+      let status_block_size_right = layout_text_width(&fl!("status_caps"));
 
       let status_chunks = Layout::default()
         .direction(Direction::Horizontal)
@@ -374,7 +377,7 @@ where
       },
       Mode::Users => greeter.users.draw_with_area(&greeter, f, main_area).ok(),
       Mode::Processing => {
-        self::processing::draw_with_area(&mut greeter, f, main_area).ok()
+        Some(self::processing::draw_with_area(&greeter, f, main_area))
       },
       _ => self::prompt::draw_with_area(&mut greeter, f, main_area).ok(),
     };
@@ -390,11 +393,18 @@ where
   Ok(())
 }
 
+// A requested layout length beyond u16::MAX already exceeds every terminal
+// rectangle. Saturate rather than wrapping a long localized label into a
+// spuriously narrow constraint.
+fn layout_text_width(text: &str) -> u16 {
+  u16::try_from(text.chars().count()).unwrap_or(u16::MAX)
+}
+
 fn get_time(greeter: &Greeter) -> String {
-  let format = match &greeter.time_format {
-    Some(format) => Cow::Borrowed(format),
-    None => Cow::Owned(fl!("date")),
-  };
+  let format = greeter
+    .time_format
+    .as_ref()
+    .map_or_else(|| Cow::Owned(fl!("date")), Cow::Borrowed);
 
   Local::now()
     .format_localized(&format, greeter.locale)
@@ -428,7 +438,7 @@ where
     Button::Power => Mode::Power,
     Button::Background => Mode::Background,
 
-    _ => {
+    Button::Other => {
       return Span::from(buttonize(&text.into()))
         .style(theme.of(&[Themed::Action]));
     },
@@ -449,13 +459,13 @@ fn prompt_value<'s, S>(theme: &Theme, text: Option<S>) -> Span<'s>
 where
   S: Into<String>,
 {
-  match text {
-    Some(text) => {
+  text.map_or_else(
+    || Span::from(""),
+    |text| {
       Span::styled(
         text.into(),
         theme.of(&[Themed::Prompt]).add_modifier(Modifier::BOLD),
       )
     },
-    None => Span::from(""),
-  }
+  )
 }

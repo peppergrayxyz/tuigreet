@@ -17,10 +17,7 @@ impl MaskedString {
 
   /// Get the display value (mask if present, otherwise actual value).
   pub fn get(&self) -> &str {
-    match self.mask {
-      Some(ref mask) => mask,
-      None => &self.value,
-    }
+    self.mask.as_deref().unwrap_or(&self.value)
   }
 
   /// Securely erase both value and mask from memory.

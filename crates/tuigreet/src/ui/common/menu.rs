@@ -78,7 +78,7 @@ where
 
       let frame = Rect::new(
         x.saturating_add(2),
-        y.saturating_add(2).saturating_add(index as u16),
+        y.saturating_add(2).saturating_add(u16::try_from(index)?),
         width.saturating_sub(4),
         1,
       );

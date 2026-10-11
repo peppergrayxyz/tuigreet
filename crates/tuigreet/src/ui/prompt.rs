@@ -73,11 +73,10 @@ pub fn draw_with_area(
     .border_style(theme.of(&[Themed::Border]));
 
   if greeter.title.enable {
-    let title_text = if let Some(ref custom) = greeter.title.custom {
-      custom.clone()
-    } else {
-      fl!("title_authenticate", hostname = get_hostname())
-    };
+    let title_text = greeter.title.custom.as_ref().map_or_else(
+      || fl!("title_authenticate", hostname = get_hostname()),
+      Clone::clone,
+    );
     let hostname = Span::from(titleize(&title_text));
     block = block.title(hostname);
   }

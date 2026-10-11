@@ -1,5 +1,3 @@
-use std::error::Error;
-
 use tui::{
   layout::{Alignment, Constraint, Direction, Layout, Rect},
   text::Span,
@@ -12,10 +10,10 @@ use crate::{
 };
 
 pub fn draw_with_area(
-  greeter: &mut Greeter,
+  greeter: &Greeter,
   f: &mut Frame,
   area: Rect,
-) -> Result<(u16, u16), Box<dyn Error>> {
+) -> (u16, u16) {
   let (x, y, width, height) = get_rect_bounds(greeter, area, 1);
 
   let container = Rect::new(x, y, width, height);
@@ -48,5 +46,5 @@ pub fn draw_with_area(
   f.render_widget(paragraph, chunks[0]);
   f.render_widget(block, container);
 
-  Ok((1, 1))
+  (1, 1)
 }

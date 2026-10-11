@@ -159,23 +159,24 @@ pub fn get_greeting_height(
   padding: u16,
   fallback: u16,
 ) -> (Option<Paragraph<'_>>, u16) {
-  if let Some(greeting) = &greeter.greeting {
-    let width = greeter.width();
+  greeter.greeting.as_ref().map_or_else(
+    || (None, fallback),
+    |greeting| {
+      let width = greeter.width();
+      let text = greeting
+        .clone()
+        .into_text()
+        .unwrap_or_else(|_| Text::raw(greeting));
+      let paragraph = Paragraph::new(text).wrap(Wrap { trim: false });
+      let height = paragraph
+        .line_count(width.saturating_sub(padding.saturating_mul(2)).max(1))
+        .saturating_add(1);
 
-    let text = match greeting.clone().into_text() {
-      Ok(text) => text,
-      Err(_) => Text::raw(greeting),
-    };
-
-    let paragraph = Paragraph::new(text.clone()).wrap(Wrap { trim: false });
-    let height = paragraph
-      .line_count(width.saturating_sub(padding.saturating_mul(2)).max(1))
-      .saturating_add(1);
-
-    (Some(paragraph), height as u16)
-  } else {
-    (None, fallback)
-  }
+      // Layout dimensions saturate, just like message and container heights;
+      // an oversized greeting must not wrap into a small visible rectangle.
+      (Some(paragraph), u16::try_from(height).unwrap_or(u16::MAX))
+    },
+  )
 }
 
 pub fn get_message_height(
@@ -183,21 +184,22 @@ pub fn get_message_height(
   padding: u16,
   fallback: u16,
 ) -> (Option<Paragraph<'_>>, u16) {
-  if let Some(message) = &greeter.message {
-    let width = greeter.width();
-    let paragraph =
-      Paragraph::new(message.trim_end()).wrap(Wrap { trim: true });
-    let height = paragraph.line_count(width.saturating_sub(4).max(1));
+  greeter.message.as_ref().map_or_else(
+    || (None, fallback),
+    |message| {
+      let width = greeter.width();
+      let paragraph =
+        Paragraph::new(message.trim_end()).wrap(Wrap { trim: true });
+      let height = paragraph.line_count(width.saturating_sub(4).max(1));
 
-    (
-      Some(paragraph),
-      u16::try_from(height)
-        .unwrap_or(u16::MAX)
-        .saturating_add(padding),
-    )
-  } else {
-    (None, fallback)
-  }
+      (
+        Some(paragraph),
+        u16::try_from(height)
+          .unwrap_or(u16::MAX)
+          .saturating_add(padding),
+      )
+    },
+  )
 }
 
 #[cfg(test)]

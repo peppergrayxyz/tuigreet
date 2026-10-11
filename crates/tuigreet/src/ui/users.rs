@@ -10,9 +10,9 @@ pub struct User {
 
 impl MenuItem for User {
   fn format(&self) -> Cow<'_, str> {
-    match &self.name {
-      Some(name) => Cow::Owned(format!("{name} ({})", self.username)),
-      None => Cow::Borrowed(&self.username),
-    }
+    self.name.as_ref().map_or_else(
+      || Cow::Borrowed(self.username.as_str()),
+      |name| Cow::Owned(format!("{name} ({})", self.username)),
+    )
   }
 }

@@ -2,9 +2,10 @@ pub mod env;
 pub mod parser;
 pub mod schema;
 
-use std::{fmt, io, path::PathBuf};
+use std::{error::Error, fmt, io, path::PathBuf};
 
 pub use schema::*;
+use toml::de::Error as TomlError;
 
 /// Errors that can occur during configuration loading or validation
 #[derive(Debug)]
@@ -13,7 +14,7 @@ pub enum ConfigError {
   Io(io::Error),
 
   /// TOML parsing error
-  Parse(toml::de::Error),
+  Parse(TomlError),
 
   /// TOML parsing error with file context (rendered via codespan)
   ParseWithContext { source: String },
@@ -48,7 +49,7 @@ impl fmt::Display for ConfigError {
       Self::Io(err) => write!(f, "I/O error: {err}"),
       Self::Parse(err) => write!(f, "TOML parse error: {err}"),
       Self::ParseWithContext { source } => {
-        write!(f, "{}", source)
+        write!(f, "{source}")
       },
       Self::Validation(msg) => write!(f, "Validation error: {msg}"),
       Self::MutuallyExclusive(opt1, opt2) => {
@@ -77,7 +78,7 @@ impl fmt::Display for ConfigError {
   }
 }
 
-impl std::error::Error for ConfigError {}
+impl Error for ConfigError {}
 
 impl From<io::Error> for ConfigError {
   fn from(err: io::Error) -> Self {
@@ -85,8 +86,8 @@ impl From<io::Error> for ConfigError {
   }
 }
 
-impl From<toml::de::Error> for ConfigError {
-  fn from(err: toml::de::Error) -> Self {
+impl From<TomlError> for ConfigError {
+  fn from(err: TomlError) -> Self {
     Self::Parse(err)
   }
 }

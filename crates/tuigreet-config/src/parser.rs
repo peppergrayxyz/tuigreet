@@ -1,15 +1,19 @@
 use std::{
   collections::HashSet,
+  env,
   fs,
+  io::{self, Write},
   path::{Path, PathBuf},
 };
 
+use chrono::format::{Item, StrftimeItems};
 use codespan_reporting::{
   diagnostic::{Diagnostic, Label},
   files::{Files, SimpleFiles},
   term,
 };
 use dirs::config_dir;
+use toml::de::Error as TomlError;
 
 use crate::{
   AlignGreeting,
@@ -450,7 +454,7 @@ fn normalize_legacy_asterisks_table(table: &mut toml::Table) {
   });
 }
 
-fn legacy_secret_mode(asterisks: bool) -> SecretMode {
+const fn legacy_secret_mode(asterisks: bool) -> SecretMode {
   if asterisks {
     SecretMode::Characters
   } else {
@@ -459,7 +463,7 @@ fn legacy_secret_mode(asterisks: bool) -> SecretMode {
 }
 
 /// Applies the compatibility alias only if the canonical field was absent.
-fn normalize_legacy_asterisks(config: &mut Config) {
+const fn normalize_legacy_asterisks(config: &mut Config) {
   if !config.secret_mode_specified
     && let Some(asterisks) = config.display.asterisks
   {
@@ -481,11 +485,10 @@ fn normalize_legacy_asterisks(config: &mut Config) {
 fn toml_error(
   path: &Path,
   content: &str,
-  original_error: toml::de::Error,
+  original_error: TomlError,
 ) -> ConfigError {
-  let span = match original_error.span() {
-    Some(span) => span,
-    None => return ConfigError::Parse(original_error),
+  let Some(span) = original_error.span() else {
+    return ConfigError::Parse(original_error);
   };
 
   let mut files = SimpleFiles::new();
@@ -494,18 +497,31 @@ fn toml_error(
   let diagnostic = Diagnostic::error()
     .with_message(original_error.message())
     .with_labels(vec![
-      Label::primary(file_id, span.start..span.end)
-        .with_message("TOML parse error"),
+      Label::primary(file_id, span.clone()).with_message("TOML parse error"),
     ]);
 
   let config = term::Config::default();
   let writer = term::termcolor::StandardStream::stderr(
     term::termcolor::ColorChoice::Always,
   );
-  term::emit_to_io_write(&mut writer.lock(), &config, &files, &diagnostic)
-    .unwrap_or_else(|_| {
-      eprintln!("TOML parse error: {}", original_error.message())
-    });
+  if let Err(error) =
+    term::emit_to_io_write(&mut writer.lock(), &config, &files, &diagnostic)
+      .or_else(|_| {
+        writeln!(
+          io::stderr().lock(),
+          "TOML parse error: {}",
+          original_error.message()
+        )
+      })
+  {
+    return ConfigError::ParseWithContext {
+      source: format!(
+        "TOML parse error: {} at {} (could not write diagnostic: {error})",
+        original_error.message(),
+        path.display()
+      ),
+    };
+  }
 
   ConfigError::ParseWithContext {
     source: format!(
@@ -818,8 +834,7 @@ impl Config {
 
     // Validate time format if provided
     if let Some(ref format) = self.display.time_format
-      && chrono::format::StrftimeItems::new(format)
-        .any(|item| matches!(item, chrono::format::Item::Error))
+      && StrftimeItems::new(format).any(|item| matches!(item, Item::Error))
     {
       return Err(ConfigError::InvalidTimeFormat);
     }
@@ -827,10 +842,10 @@ impl Config {
     // Validate session wrapper executables if requested
     if validate_wrappers {
       if let Some(ref wrapper) = self.session.session_wrapper {
-        self.validate_wrapper_command(wrapper)?;
+        Self::validate_wrapper_command(wrapper)?;
       }
       if let Some(ref wrapper) = self.session.xsession_wrapper {
-        self.validate_wrapper_command(wrapper)?;
+        Self::validate_wrapper_command(wrapper)?;
       }
     }
 
@@ -922,10 +937,7 @@ impl Config {
     all_session_dirs.extend(self.session.xsessions_dirs.clone());
 
     if all_session_dirs.len()
-      != all_session_dirs
-        .iter()
-        .collect::<std::collections::HashSet<_>>()
-        .len()
+      != all_session_dirs.iter().collect::<HashSet<_>>().len()
     {
       warnings.push(
         "Duplicate session directories detected in sessions_dirs and \
@@ -1015,7 +1027,7 @@ impl Config {
   }
 
   /// Validate that a wrapper command exists and is executable
-  fn validate_wrapper_command(&self, command: &str) -> Result<(), ConfigError> {
+  fn validate_wrapper_command(command: &str) -> Result<(), ConfigError> {
     let trimmed = command.trim();
     if trimmed.is_empty() {
       return Err(ConfigError::WrapperExecutableNotFound(PathBuf::from(
@@ -1066,8 +1078,8 @@ fn is_executable(path: &Path) -> bool {
 
 /// Check if a command exists in PATH
 fn command_exists(command: &str) -> bool {
-  if let Ok(path) = std::env::var("PATH") {
-    for dir in std::env::split_paths(&path) {
+  if let Ok(path) = env::var("PATH") {
+    for dir in env::split_paths(&path) {
       let full_path = dir.join(command);
       if full_path.exists() && is_executable(&full_path) {
         return true;
@@ -1082,44 +1094,42 @@ mod tests {
   use super::*;
 
   #[test]
-  fn toml_layers_preserve_explicit_default_values() {
+  fn toml_layers_preserve_explicit_default_values() -> Result<(), ConfigError> {
     let mut system: toml::Table =
-      toml::from_str("[display]\nshow_time = true\n[layout]\nwidth = 120\n")
-        .expect("system config is valid");
+      toml::from_str("[display]\nshow_time = true\n[layout]\nwidth = 120\n")?;
     let user: toml::Table =
-      toml::from_str("[display]\nshow_time = false\n[layout]\nwidth = 80\n")
-        .expect("user config is valid");
+      toml::from_str("[display]\nshow_time = false\n[layout]\nwidth = 80\n")?;
 
     merge_toml_tables(&mut system, user);
-    let config: Config = toml::Value::Table(system)
-      .try_into()
-      .expect("merged config is valid");
+    let config: Config = toml::Value::Table(system).try_into()?;
 
     assert!(!config.display.show_time);
     assert_eq!(config.layout.width, 80);
+    Ok(())
   }
 
   #[test]
-  fn canonical_secret_mode_wins_over_legacy_alias() {
+  fn canonical_secret_mode_wins_over_legacy_alias() -> Result<(), ConfigError> {
     let mut config: Config = toml::from_str(
       r#"
-[display]
-asterisks = true
-
-[secret]
-mode = "hidden"
-"#,
-    )
-    .expect("configuration must parse");
+  [display]
+  asterisks = true
+  
+  [secret]
+  mode = "hidden"
+  "#,
+    )?;
     config.secret_mode_specified = true;
 
     normalize_legacy_asterisks(&mut config);
 
     assert_eq!(config.secret.mode, SecretMode::Hidden);
+    Ok(())
   }
 
   #[test]
-  fn legacy_false_overrides_a_lower_characters_layer() {
+  fn legacy_false_overrides_a_lower_characters_layer() -> Result<(), ConfigError>
+  {
     let mut resolved = Config::default();
     resolved.secret.mode = SecretMode::Characters;
 
@@ -1130,11 +1140,11 @@ mode = "hidden"
     assert_eq!(resolved.secret.mode, SecretMode::Hidden);
     assert!(
       resolved
-        .validate(false)
-        .expect("legacy configuration is valid")
+        .validate(false)?
         .iter()
         .any(|warning| warning.contains("display.asterisks is deprecated"))
     );
+    Ok(())
   }
 
   #[test]
@@ -1152,16 +1162,15 @@ mode = "hidden"
   }
 
   #[test]
-  fn test_mutual_exclusive_remember_flags() {
+  fn test_mutual_exclusive_remember_flags() -> Result<(), ConfigError> {
     let toml_content = r"
-[remember]
-username = true
-session = true
-user_session = true
-";
+  [remember]
+  username = true
+  session = true
+  user_session = true
+  ";
 
-    let config: Config =
-      toml::from_str(toml_content).expect("Failed to parse TOML");
+    let config: Config = toml::from_str(toml_content)?;
 
     assert!(config.remember.session);
     assert!(config.remember.user_session);
@@ -1176,7 +1185,7 @@ user_session = true
        produce a warning, not an error"
     );
 
-    let warnings = result.unwrap();
+    let warnings = result?;
     assert!(
       warnings.iter().any(|w| {
         w.contains("remember.session") && w.contains("remember.user_session")
@@ -1184,75 +1193,71 @@ user_session = true
       "Expected a warning about conflicting remember options, got: \
        {warnings:?}"
     );
+    Ok(())
   }
 
   #[test]
-  fn test_keybindings_distinctness_in_config() {
+  fn test_keybindings_distinctness_in_config() -> Result<(), ConfigError> {
     let toml_content = r"
-[keybindings]
-command = 3
-sessions = 3
-power = 7
-";
+  [keybindings]
+  command = 3
+  sessions = 3
+  power = 7
+  ";
 
-    let config: Config =
-      toml::from_str(toml_content).expect("Failed to parse TOML");
+    let config: Config = toml::from_str(toml_content)?;
     let validation_result = config.validate(false);
 
-    match validation_result {
-      Err(ConfigError::DuplicateKeybindings) => {},
-      _ => {
-        panic!(
-          "Expected DuplicateKeybindings error, got: {validation_result:?}"
-        );
-      },
-    }
+    assert!(
+      matches!(validation_result, Err(ConfigError::DuplicateKeybindings)),
+      "Expected DuplicateKeybindings error, got: {validation_result:?}"
+    );
+    Ok(())
   }
 
   #[test]
-  fn test_session_config_default_consistency() {
+  fn test_session_config_default_consistency() -> Result<(), ConfigError> {
     let default_config = Config::default();
 
     let partial_toml = r#"
-[session]
-command = "test"
-"#;
-    let partial_config: Config =
-      toml::from_str(partial_toml).expect("Failed to parse partial TOML");
+  [session]
+  command = "test"
+  "#;
+    let partial_config: Config = toml::from_str(partial_toml)?;
 
     assert_eq!(
       default_config.session.sessions_dirs,
       partial_config.session.sessions_dirs,
       "Default and partially deserialized sessions_dirs should match"
     );
+    Ok(())
   }
 
   #[test]
-  fn test_power_config_default_consistency() {
+  fn test_power_config_default_consistency() -> Result<(), ConfigError> {
     let default_config = Config::default();
 
     let partial_toml = r#"
-[power]
-shutdown = "poweroff"
-"#;
-    let partial_config: Config =
-      toml::from_str(partial_toml).expect("Failed to parse partial TOML");
+  [power]
+  shutdown = "poweroff"
+  "#;
+    let partial_config: Config = toml::from_str(partial_toml)?;
 
     assert_eq!(
       default_config.power.use_setsid, partial_config.power.use_setsid,
       "Default and partially deserialized use_setsid should match"
     );
+    Ok(())
   }
 
   #[test]
-  fn test_wrapper_validation_empty_string() {
+  fn test_wrapper_validation_empty_string() -> Result<(), ConfigError> {
     let empty_wrapper = r#"
-[session]
-session_wrapper = ""
-"#;
+  [session]
+  session_wrapper = ""
+  "#;
 
-    let mut config: Config =
-      toml::from_str(empty_wrapper).expect("Failed to parse TOML");
+    let mut config: Config = toml::from_str(empty_wrapper)?;
 
     config.session.xsession_wrapper = None;
 
@@ -1262,22 +1267,22 @@ session_wrapper = ""
       result.is_err(),
       "Empty wrapper command should fail validation"
     );
+    Ok(())
   }
 
   // [[outputs]] validation
   #[test]
-  fn test_outputs_toml_roundtrip() {
+  fn test_outputs_toml_roundtrip() -> Result<(), ConfigError> {
     let toml_content = r#"
-[[outputs]]
-connector = "DP-1"
-primary = true
-
-[[outputs]]
-connector = "HDMI-A-1"
-enabled = false
-"#;
-    let config: Config =
-      toml::from_str(toml_content).expect("Failed to parse [[outputs]] TOML");
+  [[outputs]]
+  connector = "DP-1"
+  primary = true
+  
+  [[outputs]]
+  connector = "HDMI-A-1"
+  enabled = false
+  "#;
+    let config: Config = toml::from_str(toml_content)?;
 
     assert_eq!(config.outputs.len(), 2);
     assert_eq!(config.outputs[0].connector, "DP-1");
@@ -1289,49 +1294,50 @@ enabled = false
 
     // Validation should pass
     assert!(config.validate(false).is_ok());
+    Ok(())
   }
 
   #[test]
-  fn test_outputs_multiple_primary_is_error() {
+  fn test_outputs_multiple_primary_is_error() -> Result<(), ConfigError> {
     let toml_content = r#"
-[[outputs]]
-connector = "DP-1"
-primary = true
-
-[[outputs]]
-connector = "HDMI-A-1"
-primary = true
-"#;
-    let config: Config =
-      toml::from_str(toml_content).expect("Failed to parse TOML");
+  [[outputs]]
+  connector = "DP-1"
+  primary = true
+  
+  [[outputs]]
+  connector = "HDMI-A-1"
+  primary = true
+  "#;
+    let config: Config = toml::from_str(toml_content)?;
     let result = config.validate(false);
     assert!(
       matches!(result, Err(ConfigError::Validation(_))),
       "Multiple primary outputs should be a Validation error, got: {result:?}"
     );
+    Ok(())
   }
 
   #[test]
-  fn test_outputs_empty_connector_is_error() {
+  fn test_outputs_empty_connector_is_error() -> Result<(), ConfigError> {
     let toml_content = r#"
-[[outputs]]
-connector = ""
-"#;
-    let config: Config =
-      toml::from_str(toml_content).expect("Failed to parse TOML");
+  [[outputs]]
+  connector = ""
+  "#;
+    let config: Config = toml::from_str(toml_content)?;
     let result = config.validate(false);
     assert!(
       matches!(result, Err(ConfigError::Validation(_))),
       "Empty connector name should be a Validation error, got: {result:?}"
     );
+    Ok(())
   }
 
   #[test]
-  fn test_outputs_path_separator_in_connector_is_error() {
+  fn test_outputs_path_separator_in_connector_is_error()
+  -> Result<(), ConfigError> {
     for bad in &["../DP-1", "/sys/class/drm/DP-1", "foo/bar"] {
       let config: Config =
-        toml::from_str(&format!("[[outputs]]\nconnector = \"{bad}\"\n"))
-          .expect("Failed to parse TOML");
+        toml::from_str(&format!("[[outputs]]\nconnector = \"{bad}\"\n"))?;
       let result = config.validate(false);
       assert!(
         matches!(result, Err(ConfigError::Validation(_))),
@@ -1339,10 +1345,11 @@ connector = ""
          got: {result:?}"
       );
     }
+    Ok(())
   }
 
   #[test]
-  fn test_outputs_valid_connector_names() {
+  fn test_outputs_valid_connector_names() -> Result<(), ConfigError> {
     // Typical DRM connector name patterns that must pass
     for good in &[
       "DP-1",
@@ -1353,98 +1360,98 @@ connector = ""
       "DVI-D-1",
     ] {
       let config: Config =
-        toml::from_str(&format!("[[outputs]]\nconnector = \"{good}\"\n"))
-          .expect("Failed to parse TOML");
+        toml::from_str(&format!("[[outputs]]\nconnector = \"{good}\"\n"))?;
       assert!(
         config.validate(false).is_ok(),
         "Connector '{good}' should be valid, but validation failed"
       );
     }
+    Ok(())
   }
 
   #[test]
-  fn test_outputs_all_disabled_is_warning() {
+  fn test_outputs_all_disabled_is_warning() -> Result<(), ConfigError> {
     let toml_content = r#"
-[[outputs]]
-connector = "DP-1"
-enabled = false
-
-[[outputs]]
-connector = "HDMI-A-1"
-enabled = false
-"#;
-    let config: Config =
-      toml::from_str(toml_content).expect("Failed to parse TOML");
+  [[outputs]]
+  connector = "DP-1"
+  enabled = false
+  
+  [[outputs]]
+  connector = "HDMI-A-1"
+  enabled = false
+  "#;
+    let config: Config = toml::from_str(toml_content)?;
     let result = config.validate(false);
     assert!(
       result.is_ok(),
       "All-disabled outputs should not be an error"
     );
-    let warnings = result.unwrap();
+    let warnings = result?;
     assert!(
       warnings.iter().any(|w| w.contains("enabled = false")),
       "Expected a warning about all outputs being disabled, got: {warnings:?}"
     );
+    Ok(())
   }
 
   #[test]
-  fn test_outputs_single_primary_passes() {
+  fn test_outputs_single_primary_passes() -> Result<(), ConfigError> {
     let toml_content = r#"
-[[outputs]]
-connector = "DP-1"
-primary = true
-
-[[outputs]]
-connector = "HDMI-A-1"
-"#;
-    let config: Config =
-      toml::from_str(toml_content).expect("Failed to parse TOML");
+  [[outputs]]
+  connector = "DP-1"
+  primary = true
+  
+  [[outputs]]
+  connector = "HDMI-A-1"
+  "#;
+    let config: Config = toml::from_str(toml_content)?;
     assert!(config.validate(false).is_ok());
+    Ok(())
   }
 
   // [terminal] validation
   #[test]
-  fn test_terminal_both_set_passes() {
+  fn test_terminal_both_set_passes() -> Result<(), ConfigError> {
     let toml_content = r"
-[terminal]
-cols = 237
-rows = 52
-";
-    let config: Config =
-      toml::from_str(toml_content).expect("Failed to parse TOML");
+  [terminal]
+  cols = 237
+  rows = 52
+  ";
+    let config: Config = toml::from_str(toml_content)?;
     assert_eq!(config.terminal.cols, Some(237));
     assert_eq!(config.terminal.rows, Some(52));
     assert!(config.validate(false).is_ok());
+    Ok(())
   }
 
   #[test]
-  fn test_terminal_cols_without_rows_is_error() {
+  fn test_terminal_cols_without_rows_is_error() -> Result<(), ConfigError> {
     let toml_content = r"
-[terminal]
-cols = 237
-";
-    let config: Config =
-      toml::from_str(toml_content).expect("Failed to parse TOML");
+  [terminal]
+  cols = 237
+  ";
+    let config: Config = toml::from_str(toml_content)?;
     let result = config.validate(false);
     assert!(
       matches!(result, Err(ConfigError::Validation(_))),
       "cols without rows should be a Validation error, got: {result:?}"
     );
+    Ok(())
   }
 
   #[test]
-  fn test_terminal_rows_without_cols_is_error() {
+  fn test_terminal_rows_without_cols_is_error() -> Result<(), ConfigError> {
     let toml_content = r"
-[terminal]
-rows = 52
-";
-    let config: Config =
-      toml::from_str(toml_content).expect("Failed to parse TOML");
+  [terminal]
+  rows = 52
+  ";
+    let config: Config = toml::from_str(toml_content)?;
     let result = config.validate(false);
     assert!(
       matches!(result, Err(ConfigError::Validation(_))),
       "rows without cols should be a Validation error, got: {result:?}"
     );
+    Ok(())
   }
 
   #[test]
@@ -1478,14 +1485,13 @@ rows = 52
   }
 
   #[test]
-  fn test_wrapper_validation_whitespace_only() {
+  fn test_wrapper_validation_whitespace_only() -> Result<(), ConfigError> {
     let whitespace_wrapper = r#"
-[session]
-session_wrapper = "   "
-"#;
+  [session]
+  session_wrapper = "   "
+  "#;
 
-    let mut config: Config =
-      toml::from_str(whitespace_wrapper).expect("Failed to parse TOML");
+    let mut config: Config = toml::from_str(whitespace_wrapper)?;
 
     config.session.xsession_wrapper = None;
 
@@ -1495,6 +1501,7 @@ session_wrapper = "   "
       result.is_err(),
       "Whitespace-only wrapper command should fail validation"
     );
+    Ok(())
   }
 
   // Config priority tests

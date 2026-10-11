@@ -27,7 +27,6 @@ pub enum Kind {
 }
 
 /// Catalog entry for a registered animation kind.
-#[allow(dead_code)]
 pub struct KindInfo {
   pub kind:  Kind,
   pub name:  &'static str,
@@ -51,11 +50,20 @@ pub const KINDS: &[KindInfo] = &[
 impl Kind {
   /// Resolve a config string to a [`Kind`], or `None` for unknown / disabled.
   pub fn from_name(name: &str) -> Option<Self> {
-    match name.trim().to_ascii_lowercase().as_str() {
-      "doom" | "fire" => Some(Self::Doom),
-      "matrix" | "cmatrix" => Some(Self::Matrix),
-      _ => None,
-    }
+    let name = name.trim();
+    KINDS
+      .iter()
+      .find(|entry| entry.name.eq_ignore_ascii_case(name))
+      .map(|entry| entry.kind)
+      .or_else(|| {
+        if name.eq_ignore_ascii_case("fire") {
+          Some(Self::Doom)
+        } else if name.eq_ignore_ascii_case("cmatrix") {
+          Some(Self::Matrix)
+        } else {
+          None
+        }
+      })
   }
 }
 

@@ -1380,12 +1380,16 @@ impl Greeter {
       .session_wrapper
       .clone_from(&config.session.session_wrapper);
     if !self.config().opt_present("no-xsession-wrapper") {
-      self.xsession_wrapper = config.session.xsession_wrapper.clone();
+      self
+        .xsession_wrapper
+        .clone_from(&config.session.xsession_wrapper);
     }
-    self.default_session = config.session.default_session.clone();
+    self
+      .default_session
+      .clone_from(&config.session.default_session);
     // Display
     self.time = config.display.show_time;
-    self.time_format = config.display.time_format.clone();
+    self.time_format.clone_from(&config.display.time_format);
     self.battery = config.display.battery;
     self.greeting = if config.display.issue {
       get_issue()
@@ -1393,9 +1397,9 @@ impl Greeter {
       config.display.greeting.clone()
     };
     self.title.enable = config.display.show_title;
-    self.title.custom = config.display.custom_title.clone();
+    self.title.custom.clone_from(&config.display.custom_title);
     // Remember
-    self.default_user = config.remember.default_user.clone();
+    self.default_user.clone_from(&config.remember.default_user);
     self.remember = config.remember.username;
     self.remember_session = config.remember.session;
     self.remember_user_session = config.remember.user_session;

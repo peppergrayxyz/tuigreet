@@ -119,7 +119,7 @@ fn apply_config_layer(dest: &mut Config, src: Config) {
     dest.display.show_title = src.display.show_title;
   }
   if src.display.custom_title != defaults.display.custom_title {
-    dest.display.custom_title = src.display.custom_title.clone();
+    dest.display.custom_title = src.display.custom_title;
   }
   if src.display.issue != defaults.display.issue {
     dest.display.issue = src.display.issue;

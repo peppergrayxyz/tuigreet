@@ -2,6 +2,7 @@ pub mod backend;
 mod output;
 
 use std::{
+  io,
   panic,
   sync::{Arc, Mutex},
   time::Duration,
@@ -13,31 +14,33 @@ use tempfile::NamedTempFile;
 use tokio::{
   sync::{
     RwLock,
-    mpsc::{Receiver, Sender},
+    mpsc::{Sender, UnboundedReceiver},
   },
-  task::{JoinError, JoinHandle},
+  task::{JoinError, JoinHandle, spawn},
+  time::timeout,
 };
 use tui::buffer::Buffer;
+use tuigreet_types::AuthStatus;
 
-pub(super) use self::{
+use self::{
   backend::{TestBackend, output},
-  output::*,
+  output::Output,
 };
 use crate::{
   Greeter,
   event::{Event, Events},
+  run,
   ui::sessions::SessionSource,
 };
 
-pub(super) struct IntegrationRunner(Arc<RwLock<_IntegrationRunner>>);
+pub(super) struct IntegrationRunner(Arc<RwLock<RunnerState>>);
 
-struct _IntegrationRunner {
+struct RunnerState {
   server: Option<JoinHandle<()>>,
-  client: Option<JoinHandle<()>>,
-
-  pub buffer: Arc<Mutex<Buffer>>,
-  pub sender: Sender<Event>,
-  pub tick:   Receiver<bool>,
+  client: Option<JoinHandle<io::Result<()>>>,
+  buffer: Arc<Mutex<Buffer>>,
+  sender: Sender<Event>,
+  tick:   UnboundedReceiver<bool>,
 }
 
 impl Clone for IntegrationRunner {
@@ -47,33 +50,33 @@ impl Clone for IntegrationRunner {
 }
 
 impl IntegrationRunner {
-  pub async fn new(
+  pub fn new(
     opts: SessionOptions,
     builder: Option<fn(&mut Greeter)>,
-  ) -> Self {
-    Self::new_with_size(opts, builder, (200, 40)).await
+  ) -> io::Result<Self> {
+    Self::new_with_size(opts, builder, (200, 40))
   }
 
-  pub async fn new_with_size(
+  pub fn new_with_size(
     opts: SessionOptions,
     builder: Option<fn(&mut Greeter)>,
     size: (u16, u16),
-  ) -> Self {
-    let socket = NamedTempFile::new().unwrap().into_temp_path().to_path_buf();
+  ) -> io::Result<Self> {
+    let socket = NamedTempFile::new()?.into_temp_path().to_path_buf();
+    let socket_name = socket
+      .to_str()
+      .ok_or_else(|| io::Error::other("socket path is not valid UTF-8"))?
+      .to_string();
 
     let (backend, buffer, tick) = TestBackend::new(size.0, size.1);
     let events = Events::new();
     let sender = events.sender();
 
-    let server = tokio::task::spawn({
-      let socket = socket.clone();
-
-      async move {
-        libgreetd_stub::start(&socket, &opts).await;
-      }
+    let server = spawn(async move {
+      libgreetd_stub::start(&socket, &opts).await;
     });
 
-    let client = tokio::task::spawn(async move {
+    let client = spawn(async move {
       let mut greeter = Greeter::new(events.sender()).await;
       greeter.session_source = SessionSource::Command("uname".to_string());
 
@@ -82,136 +85,181 @@ impl IntegrationRunner {
       }
 
       if greeter.config.is_none() {
-        greeter.config = Greeter::options().parse(&[""]).ok();
+        greeter.config =
+          Some(Greeter::options().parse([""]).map_err(io::Error::other)?);
       }
 
       greeter.logfile = "/tmp/tuigreet.log".to_string();
-      greeter.socket = socket.to_str().unwrap().to_string();
+      greeter.socket = socket_name;
       greeter.events = Some(events.sender());
       greeter.connect().await;
 
-      let _ = crate::run(backend, greeter, events).await;
+      match run(backend, greeter, events).await {
+        Ok(()) => Ok(()),
+        // Authentication and explicit user exits are normal test completion.
+        Err(error)
+          if matches!(
+            error.downcast_ref::<AuthStatus>(),
+            Some(AuthStatus::Success | AuthStatus::Cancel)
+          ) =>
+        {
+          Ok(())
+        },
+        Err(error) => Err(io::Error::other(error.to_string())),
+      }
     });
 
-    Self(Arc::new(RwLock::new(_IntegrationRunner {
+    Ok(Self(Arc::new(RwLock::new(RunnerState {
       server: Some(server),
       client: Some(client),
       buffer,
       sender,
       tick,
-    })))
+    }))))
   }
 
-  pub async fn join_until_client_exit(&mut self, mut events: JoinHandle<()>) {
+  pub async fn join_until_client_exit(
+    &self,
+    mut events: JoinHandle<io::Result<()>>,
+  ) -> io::Result<()> {
     let (mut server, mut client) = {
       let mut runner = self.0.write().await;
-
-      (runner.server.take().unwrap(), runner.client.take().unwrap())
+      (
+        runner
+          .server
+          .take()
+          .ok_or_else(|| io::Error::other("server already joined"))?,
+        runner
+          .client
+          .take()
+          .ok_or_else(|| io::Error::other("client already joined"))?,
+      )
     };
 
-    let mut exited = false;
-
-    while !exited {
-      tokio::select! {
-        () = tokio::time::sleep(Duration::from_secs(5)) => break,
-        _ = (&mut server) => {}
-        _ = (&mut client) => { exited = true; },
-        ret = (&mut events), if !events.is_finished() => rethrow(ret),
+    let result = timeout(Duration::from_secs(5), async {
+      let mut server_done = false;
+      let mut client_done = false;
+      let mut events_done = false;
+      while !client_done || !events_done {
+        tokio::select! {
+          ret = &mut server, if !server_done => {
+            rethrow(ret)?;
+            server_done = true;
+          },
+          ret = &mut client, if !client_done => {
+            rethrow(ret)??;
+            client_done = true;
+          },
+          ret = &mut events, if !events_done => {
+            rethrow(ret)??;
+            events_done = true;
+          },
+        }
       }
-    }
+      Ok(())
+    })
+    .await;
 
-    assert!(exited, "tuigreet did not exit");
+    server.abort();
+    client.abort();
+    events.abort();
+    result.map_err(|err| io::Error::new(io::ErrorKind::TimedOut, err))?
   }
 
-  pub async fn join_until_end(&mut self, events: JoinHandle<()>) {
-    let (server, client) = {
+  pub async fn join_until_end(
+    &self,
+    mut events: JoinHandle<io::Result<()>>,
+  ) -> io::Result<()> {
+    let (mut server, mut client) = {
       let mut runner = self.0.write().await;
-
-      (runner.server.take().unwrap(), runner.client.take().unwrap())
+      (
+        runner
+          .server
+          .take()
+          .ok_or_else(|| io::Error::other("server already joined"))?,
+        runner
+          .client
+          .take()
+          .ok_or_else(|| io::Error::other("client already joined"))?,
+      )
     };
 
-    tokio::select! {
-      () = tokio::time::sleep(Duration::from_secs(5)) => {},
-      _ = server => {}
-      _ = client => {},
-      ret = events => rethrow(ret),
-    }
-  }
-
-  #[allow(unused)]
-  pub async fn wait_until_buffer_contains(&mut self, needle: &str) {
-    loop {
-      if output(&self.0.read().await.buffer).contains(needle) {
-        return;
+    let result = timeout(Duration::from_secs(5), async {
+      tokio::select! {
+        ret = &mut server => {
+          rethrow(ret)?;
+          Err(io::Error::other("server exited before test assertions completed"))
+        },
+        ret = &mut client => {
+          rethrow(ret)??;
+          Err(io::Error::other("client exited before test assertions completed"))
+        },
+        ret = &mut events => rethrow(ret)?,
       }
+    }).await;
 
-      self.wait_for_render().await;
+    server.abort();
+    client.abort();
+    events.abort();
+    result.map_err(|err| io::Error::new(io::ErrorKind::TimedOut, err))?
+  }
+
+  pub async fn wait_until_buffer_contains(
+    &self,
+    needle: &str,
+  ) -> io::Result<()> {
+    loop {
+      if self.output().await?.contains(needle) {
+        return Ok(());
+      }
+      self.wait_for_render().await?;
     }
   }
 
-  #[allow(unused, unused_must_use)]
-  pub async fn send_key(&self, key: KeyCode) {
-    self
-      .0
-      .write()
-      .await
-      .sender
-      .send(Event::Key(KeyEvent::new(key, KeyModifiers::empty())))
-      .await;
+  pub async fn send_key(&self, key: KeyCode) -> io::Result<()> {
+    self.send_modified_key(key, KeyModifiers::empty()).await
   }
 
-  #[allow(unused, unused_must_use)]
-  pub async fn send_modified_key(&self, key: KeyCode, modifiers: KeyModifiers) {
-    self
-      .0
-      .write()
-      .await
-      .sender
+  pub async fn send_modified_key(
+    &self,
+    key: KeyCode,
+    modifiers: KeyModifiers,
+  ) -> io::Result<()> {
+    let sender = self.0.read().await.sender.clone();
+    sender
       .send(Event::Key(KeyEvent::new(key, modifiers)))
-      .await;
-  }
-
-  #[allow(unused, unused_must_use)]
-  pub async fn send_text(&self, text: &str) {
-    for char in text.chars() {
-      self
-        .0
-        .write()
-        .await
-        .sender
-        .send(Event::Key(KeyEvent::new(
-          KeyCode::Char(char),
-          KeyModifiers::empty(),
-        )))
-        .await;
-    }
-
-    self
-      .0
-      .write()
       .await
-      .sender
-      .send(Event::Key(KeyEvent::new(
-        KeyCode::Enter,
-        KeyModifiers::empty(),
-      )))
-      .await;
+      .map_err(io::Error::other)
   }
 
-  #[allow(unused)]
-  pub async fn wait_for_render(&mut self) {
-    self.0.write().await.tick.recv().await;
+  pub async fn send_text(&self, text: &str) -> io::Result<()> {
+    for char in text.chars() {
+      self.send_key(KeyCode::Char(char)).await?;
+    }
+    self.send_key(KeyCode::Enter).await
   }
 
-  pub async fn output(&self) -> Output {
-    Output(output(&self.0.read().await.buffer))
+  pub async fn wait_for_render(&self) -> io::Result<()> {
+    let mut runner = self.0.write().await;
+    // Only a fresh frame can acknowledge keys sent since the previous wait.
+    while runner.tick.try_recv().is_ok() {}
+    runner.tick.recv().await.ok_or_else(|| {
+      io::Error::other("renderer stopped before expected frame")
+    })?;
+    drop(runner);
+    Ok(())
+  }
+
+  pub async fn output(&self) -> io::Result<Output> {
+    let buffer = Arc::clone(&self.0.read().await.buffer);
+    Ok(Output(output(&buffer)?))
   }
 }
 
-fn rethrow(result: Result<(), JoinError>) {
-  if let Err(err) = result
-    && let Ok(panick) = err.try_into_panic()
-  {
-    panic::resume_unwind(panick);
+fn rethrow<T>(result: Result<T, JoinError>) -> io::Result<T> {
+  match result {
+    Ok(value) => Ok(value),
+    Err(err) if err.is_panic() => panic::resume_unwind(err.into_panic()),
+    Err(err) => Err(io::Error::other(err)),
   }
 }

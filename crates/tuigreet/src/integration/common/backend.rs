@@ -1,5 +1,3 @@
-#![allow(unused_must_use)]
-
 // Copied and adapted from the codebase of ratatui.
 //
 // Repository: https://github.com/ratatui-org/ratatui
@@ -29,6 +27,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 use std::{
+  cmp,
   fmt::Write,
   io,
   sync::{Arc, Mutex},
@@ -44,7 +43,7 @@ use unicode_width::UnicodeWidthStr;
 
 #[derive(Clone)]
 pub struct TestBackend {
-  tick:   mpsc::Sender<bool>,
+  tick:   mpsc::UnboundedSender<bool>,
   width:  u16,
   buffer: Arc<Mutex<Buffer>>,
   height: u16,
@@ -52,8 +51,10 @@ pub struct TestBackend {
   pos:    (u16, u16),
 }
 
-pub fn output(buffer: &Arc<Mutex<Buffer>>) -> String {
-  let buffer = buffer.lock().unwrap();
+pub fn output(buffer: &Arc<Mutex<Buffer>>) -> io::Result<String> {
+  let buffer = buffer
+    .lock()
+    .map_err(|err| io::Error::other(err.to_string()))?;
 
   let mut view = String::with_capacity(
     buffer.content.len() + buffer.area.height as usize * 3,
@@ -67,31 +68,32 @@ pub fn output(buffer: &Arc<Mutex<Buffer>>) -> String {
       } else {
         overwritten.push((x, c.symbol()));
       }
-      skip = std::cmp::max(skip, c.symbol().width()).saturating_sub(1);
+      skip = cmp::max(skip, c.symbol().width()).saturating_sub(1);
     }
     if !overwritten.is_empty() {
       write!(&mut view, " Hidden by multi-width symbols: {overwritten:?}")
-        .unwrap();
+        .map_err(io::Error::other)?;
     }
     view.push('\n');
   }
-  view
+  drop(buffer);
+  Ok(view)
 }
 
 impl TestBackend {
   pub fn new(
     width: u16,
     height: u16,
-  ) -> (Self, Arc<Mutex<Buffer>>, mpsc::Receiver<bool>) {
+  ) -> (Self, Arc<Mutex<Buffer>>, mpsc::UnboundedReceiver<bool>) {
     let buffer =
       Arc::new(Mutex::new(Buffer::empty(Rect::new(0, 0, width, height))));
-    let (tx, rx) = mpsc::channel::<bool>(10);
+    let (tx, rx) = mpsc::unbounded_channel::<bool>();
 
     let backend = Self {
       tick: tx,
       width,
       height,
-      buffer: buffer.clone(),
+      buffer: Arc::clone(&buffer),
       cursor: false,
       pos: (0, 0),
     };
@@ -107,7 +109,10 @@ impl Backend for TestBackend {
   where
     I: Iterator<Item = (u16, u16, &'a Cell)>,
   {
-    let mut buffer = self.buffer.lock().unwrap();
+    let mut buffer = self
+      .buffer
+      .lock()
+      .map_err(|err| io::Error::other(err.to_string()))?;
 
     for (x, y, c) in content {
       if let Some(cell) = buffer.cell_mut((x, y)) {
@@ -115,13 +120,8 @@ impl Backend for TestBackend {
       }
     }
 
-    let sender = self.tick.clone();
-
-    std::thread::spawn(move || {
-      sender.blocking_send(true);
-    });
-
-    Ok(())
+    drop(buffer);
+    self.tick.send(true).map_err(io::Error::other)
   }
 
   fn hide_cursor(&mut self) -> io::Result<()> {
@@ -148,19 +148,22 @@ impl Backend for TestBackend {
   }
 
   fn clear(&mut self) -> io::Result<()> {
-    self.buffer.lock().unwrap().reset();
+    self
+      .buffer
+      .lock()
+      .map_err(|err| io::Error::other(err.to_string()))?
+      .reset();
     Ok(())
   }
 
-  fn clear_region(
-    &mut self,
-    clear_type: tui::backend::ClearType,
-  ) -> io::Result<()> {
-    let buffer = self.buffer.clone();
-    let mut buffer = buffer.lock().unwrap();
+  fn clear_region(&mut self, clear_type: ClearType) -> io::Result<()> {
+    let mut buffer = self
+      .buffer
+      .lock()
+      .map_err(|err| io::Error::other(err.to_string()))?;
 
     match clear_type {
-      ClearType::All => self.clear()?,
+      ClearType::All => buffer.reset(),
       ClearType::AfterCursor => {
         let index = buffer.index_of(self.pos.0, self.pos.1) + 1;
         buffer.content[index..].fill(Cell::default());
@@ -180,6 +183,7 @@ impl Backend for TestBackend {
         buffer.content[index..=line_end_index].fill(Cell::default());
       },
     }
+    drop(buffer);
     Ok(())
   }
 
@@ -204,7 +208,7 @@ impl Backend for TestBackend {
       self
         .buffer
         .lock()
-        .unwrap()
+        .map_err(|err| io::Error::other(err.to_string()))?
         .content
         .rotate_left((self.width * rotate_by).into());
     }

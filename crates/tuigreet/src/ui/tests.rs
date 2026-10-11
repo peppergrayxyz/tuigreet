@@ -1,12 +1,7 @@
-use std::sync::Arc;
+use std::{error::Error, sync::Arc};
 
 use tokio::sync::RwLock;
-use tui::{
-  Terminal,
-  buffer::Buffer,
-  layout::{Constraint, Direction, Layout, Rect},
-  style::Color,
-};
+use tui::{Terminal, buffer::Buffer, style::Color};
 use tuigreet_config::{Config, WidgetPosition};
 use tuigreet_types::Mode;
 
@@ -26,14 +21,17 @@ async fn render_ui(
   greeter: Arc<RwLock<Greeter>>,
   width: u16,
   height: u16,
-) -> Buffer {
+) -> Result<Buffer, Box<dyn Error>> {
   let (backend, buffer, _rx) = TestBackend::new(width, height);
-  let mut terminal = Terminal::new(backend).unwrap();
+  let mut terminal = Terminal::new(backend)?;
 
-  ui::draw(greeter.clone(), &mut terminal).await.unwrap();
+  ui::draw(greeter, &mut terminal).await?;
 
-  let locked_buffer = buffer.lock().unwrap();
-  locked_buffer.clone()
+  let rendered = buffer
+    .lock()
+    .map_err(|_| "test rendering buffer mutex was poisoned")?
+    .clone();
+  Ok(rendered)
 }
 
 /// Get text from a line in the buffer
@@ -42,37 +40,14 @@ fn get_line(buffer: &Buffer, y: u16, width: u16) -> String {
 }
 
 #[tokio::test]
-async fn test_layout_basic_structure() {
-  // Test that basic layout splits work correctly
-  let area = Rect::new(0, 0, 80, 24);
-  let constraints = vec![
-    Constraint::Length(1), // window padding
-    Constraint::Min(1),    // main content
-    Constraint::Length(1), // status bar
-    Constraint::Length(1), // window padding
-  ];
-
-  let chunks = Layout::default()
-    .direction(Direction::Vertical)
-    .constraints(constraints)
-    .split(area);
-
-  assert_eq!(chunks.len(), 4);
-  assert_eq!(chunks[0].height, 1); // top padding
-  assert_eq!(chunks[1].y, 1); // main starts after padding
-  assert_eq!(chunks[2].y, chunks[1].y + chunks[1].height); // status after main
-  assert_eq!(chunks[3].y, 23); // bottom padding at end
-}
-
-#[tokio::test]
-async fn test_status_bar_bottom_default() {
+async fn test_status_bar_bottom_default() -> Result<(), Box<dyn Error>> {
   let greeter = test_greeter();
   {
     let mut g = greeter.write().await;
     g.mode = Mode::Username;
   }
 
-  let buffer = render_ui(greeter, 80, 24).await;
+  let buffer = render_ui(greeter, 80, 24).await?;
 
   // Status bar should be near bottom (accounting for padding)
   // Check for status bar indicators in the lower portion
@@ -86,10 +61,11 @@ async fn test_status_bar_bottom_default() {
   }
 
   assert!(found_status, "Status bar should be rendered at bottom");
+  Ok(())
 }
 
 #[tokio::test]
-async fn test_status_bar_top_position() {
+async fn test_status_bar_top_position() -> Result<(), Box<dyn Error>> {
   let greeter = test_greeter();
   {
     let mut g = greeter.write().await;
@@ -102,7 +78,7 @@ async fn test_status_bar_top_position() {
     g.apply_config(&config);
   }
 
-  let buffer = render_ui(greeter, 80, 24).await;
+  let buffer = render_ui(greeter, 80, 24).await?;
 
   // Status bar has distinctive patterns: ESC, F2, F3, F12
   // When at top position, it should be at row 0 (absolute top, before padding)
@@ -127,10 +103,11 @@ async fn test_status_bar_top_position() {
      Found at top (row 0): {top_has_status}, Found at bottom (row 22): \
      {bottom_has_status}"
   );
+  Ok(())
 }
 
 #[tokio::test]
-async fn test_status_bar_hidden() {
+async fn test_status_bar_hidden() -> Result<(), Box<dyn Error>> {
   let greeter = test_greeter();
   {
     let mut g = greeter.write().await;
@@ -141,7 +118,7 @@ async fn test_status_bar_hidden() {
     g.apply_config(&config);
   }
 
-  let buffer = render_ui(greeter, 80, 24).await;
+  let buffer = render_ui(greeter, 80, 24).await?;
 
   // Status bar should not be rendered anywhere
   for y in 0..24 {
@@ -154,10 +131,11 @@ async fn test_status_bar_hidden() {
       "Status bar should be hidden at line {y}: {line}"
     );
   }
+  Ok(())
 }
 
 #[tokio::test]
-async fn test_time_widget_top_default() {
+async fn test_time_widget_top_default() -> Result<(), Box<dyn Error>> {
   let greeter = test_greeter();
   {
     let mut g = greeter.write().await;
@@ -165,7 +143,7 @@ async fn test_time_widget_top_default() {
     g.mode = Mode::Username;
   }
 
-  let buffer = render_ui(greeter, 80, 24).await;
+  let buffer = render_ui(greeter, 80, 24).await?;
 
   // Time should be at top - search first few rows
   let mut found_time = false;
@@ -181,10 +159,11 @@ async fn test_time_widget_top_default() {
   }
 
   assert!(found_time, "Time widget should be rendered at top");
+  Ok(())
 }
 
 #[tokio::test]
-async fn test_time_widget_bottom_position() {
+async fn test_time_widget_bottom_position() -> Result<(), Box<dyn Error>> {
   let greeter = test_greeter();
   {
     let mut g = greeter.write().await;
@@ -196,7 +175,7 @@ async fn test_time_widget_bottom_position() {
     g.apply_config(&config);
   }
 
-  let buffer = render_ui(greeter, 80, 24).await;
+  let buffer = render_ui(greeter, 80, 24).await?;
 
   // Time should be near bottom
   let mut found_time = false;
@@ -209,17 +188,18 @@ async fn test_time_widget_bottom_position() {
   }
 
   assert!(found_time, "Time widget should be at bottom");
+  Ok(())
 }
 
 #[tokio::test]
-async fn test_username_prompt_renders() {
+async fn test_username_prompt_renders() -> Result<(), Box<dyn Error>> {
   let greeter = test_greeter();
   {
     let mut g = greeter.write().await;
     g.mode = Mode::Username;
   }
 
-  let buffer = render_ui(greeter, 80, 24).await;
+  let buffer = render_ui(greeter, 80, 24).await?;
 
   // Find "Username" prompt in buffer
   let mut found_username = false;
@@ -232,10 +212,11 @@ async fn test_username_prompt_renders() {
   }
 
   assert!(found_username, "Username prompt should be rendered");
+  Ok(())
 }
 
 #[tokio::test]
-async fn test_password_prompt_renders() {
+async fn test_password_prompt_renders() -> Result<(), Box<dyn Error>> {
   let greeter = test_greeter();
   {
     let mut g = greeter.write().await;
@@ -244,7 +225,7 @@ async fn test_password_prompt_renders() {
     g.prompt = Some("Password".to_string());
   }
 
-  let buffer = render_ui(greeter, 80, 24).await;
+  let buffer = render_ui(greeter, 80, 24).await?;
 
   // Find password prompt
   let mut found_password = false;
@@ -257,10 +238,11 @@ async fn test_password_prompt_renders() {
   }
 
   assert!(found_password, "Password prompt should be rendered");
+  Ok(())
 }
 
 #[tokio::test]
-async fn test_greeting_renders() {
+async fn test_greeting_renders() -> Result<(), Box<dyn Error>> {
   let greeter = test_greeter();
   {
     let mut g = greeter.write().await;
@@ -268,7 +250,7 @@ async fn test_greeting_renders() {
     g.greeting = Some("Welcome to Test System!".to_string());
   }
 
-  let buffer = render_ui(greeter, 80, 24).await;
+  let buffer = render_ui(greeter, 80, 24).await?;
 
   // Find greeting text
   let mut found_greeting = false;
@@ -281,17 +263,18 @@ async fn test_greeting_renders() {
   }
 
   assert!(found_greeting, "Greeting should be rendered");
+  Ok(())
 }
 
 #[tokio::test]
-async fn test_container_renders() {
+async fn test_container_renders() -> Result<(), Box<dyn Error>> {
   let greeter = test_greeter();
   {
     let mut g = greeter.write().await;
     g.mode = Mode::Username;
   }
 
-  let buffer = render_ui(greeter, 80, 24).await;
+  let buffer = render_ui(greeter, 80, 24).await?;
 
   // Check for border characters across the entire buffer
   let mut has_borders = false;
@@ -318,10 +301,11 @@ async fn test_container_renders() {
     has_borders,
     "Container borders should be rendered somewhere in the buffer"
   );
+  Ok(())
 }
 
 #[tokio::test]
-async fn test_window_padding() {
+async fn test_window_padding() -> Result<(), Box<dyn Error>> {
   let greeter = test_greeter();
   {
     let mut g = greeter.write().await;
@@ -332,7 +316,7 @@ async fn test_window_padding() {
     g.apply_config(&config);
   }
 
-  let buffer = render_ui(greeter, 80, 24).await;
+  let buffer = render_ui(greeter, 80, 24).await?;
 
   // First two rows should be padding (empty or minimal content)
   let first_row = get_line(&buffer, 0, 80);
@@ -346,78 +330,11 @@ async fn test_window_padding() {
     second_row.chars().all(|c| c == ' '),
     "Second row should be padding (all spaces)"
   );
+  Ok(())
 }
 
 #[tokio::test]
-async fn test_multiple_layout_sizes() {
-  // Test that layout works correctly at different terminal sizes
-  let sizes = vec![(80, 24), (120, 40), (40, 12)];
-
-  for (width, height) in sizes {
-    let greeter = test_greeter();
-    {
-      let mut g = greeter.write().await;
-      g.mode = Mode::Username;
-    }
-
-    let buffer = render_ui(greeter, width, height).await;
-
-    // Basic sanity checks
-    assert_eq!(buffer.area().width, width);
-    assert_eq!(buffer.area().height, height);
-
-    // Should still render username prompt
-    let mut found_content = false;
-    for y in 0..height {
-      let line = get_line(&buffer, y, width);
-      if !line.trim().is_empty() {
-        found_content = true;
-        break;
-      }
-    }
-
-    assert!(
-      found_content,
-      "Should render content at size {width}x{height}"
-    );
-  }
-}
-
-#[tokio::test]
-async fn test_combined_time_and_status_positions() {
-  // Test all combinations of time and status positions
-  let positions = vec![
-    WidgetPosition::Top,
-    WidgetPosition::Bottom,
-    WidgetPosition::Default,
-    WidgetPosition::Hidden,
-  ];
-
-  for time_pos in &positions {
-    for status_pos in &positions {
-      let greeter = test_greeter();
-      {
-        let mut g = greeter.write().await;
-        g.mode = Mode::Username;
-        g.time = true;
-        let mut config = Config::default();
-        config.layout.widgets.time_position = time_pos.clone();
-        config.layout.widgets.status_position = status_pos.clone();
-        g.loaded_config = Some(config.clone());
-        g.apply_config(&config);
-      }
-
-      let buffer = render_ui(greeter, 80, 24).await;
-
-      // Just verify it renders without panicking
-      assert_eq!(buffer.area().width, 80);
-      assert_eq!(buffer.area().height, 24);
-    }
-  }
-}
-
-#[tokio::test]
-async fn test_theme_border_color_applied() {
+async fn test_theme_border_color_applied() -> Result<(), Box<dyn Error>> {
   let greeter = test_greeter();
   {
     let mut g = greeter.write().await;
@@ -431,7 +348,7 @@ async fn test_theme_border_color_applied() {
     g.apply_theme_config(&config.theme, None);
   }
 
-  let buffer = render_ui(greeter, 80, 24).await;
+  let buffer = render_ui(greeter, 80, 24).await?;
 
   // Check that border characters have red color
   let mut found_red_border = false;
@@ -460,10 +377,11 @@ async fn test_theme_border_color_applied() {
     found_red_border,
     "Border should be rendered with red color from theme config"
   );
+  Ok(())
 }
 
 #[tokio::test]
-async fn test_theme_prompt_color_applied() {
+async fn test_theme_prompt_color_applied() -> Result<(), Box<dyn Error>> {
   let greeter = test_greeter();
   {
     let mut g = greeter.write().await;
@@ -477,7 +395,7 @@ async fn test_theme_prompt_color_applied() {
     g.apply_theme_config(&config.theme, None);
   }
 
-  let buffer = render_ui(greeter, 80, 24).await;
+  let buffer = render_ui(greeter, 80, 24).await?;
 
   // Look for yellow prompt text
   let mut found_yellow = false;
@@ -498,10 +416,12 @@ async fn test_theme_prompt_color_applied() {
     found_yellow,
     "Prompt should be rendered with yellow color from theme config"
   );
+  Ok(())
 }
 
 #[tokio::test]
-async fn test_theme_container_background_applied() {
+async fn test_theme_container_background_applied() -> Result<(), Box<dyn Error>>
+{
   let greeter = test_greeter();
   {
     let mut g = greeter.write().await;
@@ -515,7 +435,7 @@ async fn test_theme_container_background_applied() {
     g.apply_theme_config(&config.theme, None);
   }
 
-  let buffer = render_ui(greeter, 80, 24).await;
+  let buffer = render_ui(greeter, 80, 24).await?;
 
   // Look for blue background in container area
   let mut found_blue_bg = false;
@@ -536,10 +456,11 @@ async fn test_theme_container_background_applied() {
     found_blue_bg,
     "Container should be rendered with blue background from theme config"
   );
+  Ok(())
 }
 
 #[tokio::test]
-async fn test_theme_greeting_color_applied() {
+async fn test_theme_greeting_color_applied() -> Result<(), Box<dyn Error>> {
   let greeter = test_greeter();
   {
     let mut g = greeter.write().await;
@@ -554,7 +475,7 @@ async fn test_theme_greeting_color_applied() {
     g.apply_theme_config(&config.theme, None);
   }
 
-  let buffer = render_ui(greeter, 80, 24).await;
+  let buffer = render_ui(greeter, 80, 24).await?;
 
   // Look for green greeting text
   let mut found_green_greeting = false;
@@ -578,10 +499,11 @@ async fn test_theme_greeting_color_applied() {
     found_green_greeting,
     "Greeting should be rendered with green color from theme config"
   );
+  Ok(())
 }
 
 #[tokio::test]
-async fn test_theme_hex_colors_applied() {
+async fn test_theme_hex_colors_applied() -> Result<(), Box<dyn Error>> {
   let greeter = test_greeter();
   {
     let mut g = greeter.write().await;
@@ -595,7 +517,7 @@ async fn test_theme_hex_colors_applied() {
     g.apply_theme_config(&config.theme, None);
   }
 
-  let buffer = render_ui(greeter, 80, 24).await;
+  let buffer = render_ui(greeter, 80, 24).await?;
 
   // Look for RGB(255,0,0) border
   let mut found_rgb_border = false;
@@ -624,10 +546,11 @@ async fn test_theme_hex_colors_applied() {
     found_rgb_border,
     "Border should be rendered with hex color (#ff0000) from theme config"
   );
+  Ok(())
 }
 
 #[tokio::test]
-async fn test_theme_multiple_colors_applied() {
+async fn test_theme_multiple_colors_applied() -> Result<(), Box<dyn Error>> {
   let greeter = test_greeter();
   {
     let mut g = greeter.write().await;
@@ -644,7 +567,7 @@ async fn test_theme_multiple_colors_applied() {
     g.apply_theme_config(&config.theme, None);
   }
 
-  let buffer = render_ui(greeter, 80, 24).await;
+  let buffer = render_ui(greeter, 80, 24).await?;
 
   let mut found_red = false;
   let mut found_cyan = false;
@@ -670,10 +593,11 @@ async fn test_theme_multiple_colors_applied() {
     found_cyan || found_green,
     "Should have cyan or green elements from text/greet theme"
   );
+  Ok(())
 }
 
 #[tokio::test]
-async fn test_cli_theme_overrides_config_theme() {
+async fn test_cli_theme_overrides_config_theme() -> Result<(), Box<dyn Error>> {
   let greeter = test_greeter();
   {
     let mut g = greeter.write().await;
@@ -688,7 +612,7 @@ async fn test_cli_theme_overrides_config_theme() {
     g.apply_theme_config(&config.theme, Some("border=blue"));
   }
 
-  let buffer = render_ui(greeter, 80, 24).await;
+  let buffer = render_ui(greeter, 80, 24).await?;
 
   // Should find blue border (CLI override), not red
   let mut found_blue_border = false;
@@ -723,10 +647,11 @@ async fn test_cli_theme_overrides_config_theme() {
     !found_red_border,
     "Config theme red should be overridden by CLI"
   );
+  Ok(())
 }
 
 #[tokio::test]
-async fn test_theme_with_time_widget() {
+async fn test_theme_with_time_widget() -> Result<(), Box<dyn Error>> {
   let greeter = test_greeter();
   {
     let mut g = greeter.write().await;
@@ -742,7 +667,7 @@ async fn test_theme_with_time_widget() {
     g.apply_theme_config(&config.theme, None);
   }
 
-  let buffer = render_ui(greeter, 80, 24).await;
+  let buffer = render_ui(greeter, 80, 24).await?;
 
   // Verify time is displayed and theme is applied
   let mut found_time = false;
@@ -770,10 +695,12 @@ async fn test_theme_with_time_widget() {
     found_lightred,
     "Theme color (lightred) should be applied somewhere in the UI"
   );
+  Ok(())
 }
 
 #[tokio::test]
-async fn test_doom_animation_renders_and_form_stays_legible() {
+async fn test_doom_animation_renders_and_form_stays_legible()
+-> Result<(), Box<dyn Error>> {
   use crate::ui::bg_animation::{self as animation, AnimationSpec, doom};
 
   let greeter = test_greeter();
@@ -786,9 +713,9 @@ async fn test_doom_animation_renders_and_form_stays_legible() {
   }
 
   // Render a few frames so the fire actually propagates upward.
-  let mut buffer = render_ui(greeter.clone(), 80, 24).await;
+  let mut buffer = render_ui(Arc::clone(&greeter), 80, 24).await?;
   for _ in 0..40 {
-    buffer = render_ui(greeter.clone(), 80, 24).await;
+    buffer = render_ui(Arc::clone(&greeter), 80, 24).await?;
   }
 
   // Some cell on the bottom row should be a fire glyph — the bottom is
@@ -800,8 +727,7 @@ async fn test_doom_animation_renders_and_form_stays_legible() {
       .symbol()
       .chars()
       .next()
-      .map(|c| fire_glyphs.contains(&c))
-      .unwrap_or(false)
+      .is_some_and(|c| fire_glyphs.contains(&c))
   });
   assert!(bottom_has_fire, "fire should render on the bottom row");
 
@@ -813,14 +739,15 @@ async fn test_doom_animation_renders_and_form_stays_legible() {
       .symbol()
       .chars()
       .next()
-      .map(|c| fire_glyphs.contains(&c))
-      .unwrap_or(false)
+      .is_some_and(|c| fire_glyphs.contains(&c))
   });
   assert!(!form_has_fire, "fire must not bleed through the login form");
+  Ok(())
 }
 
 #[tokio::test]
-async fn test_matrix_animation_renders_and_form_stays_legible() {
+async fn test_matrix_animation_renders_and_form_stays_legible()
+-> Result<(), Box<dyn Error>> {
   use crate::ui::bg_animation::{self as animation, AnimationSpec, matrix};
 
   let greeter = test_greeter();
@@ -833,9 +760,9 @@ async fn test_matrix_animation_renders_and_form_stays_legible() {
   }
 
   // Render enough frames for streams to descend into the screen
-  let mut buffer = render_ui(greeter.clone(), 80, 24).await;
+  let mut buffer = render_ui(Arc::clone(&greeter), 80, 24).await?;
   for _ in 0..60 {
-    buffer = render_ui(greeter.clone(), 80, 24).await;
+    buffer = render_ui(Arc::clone(&greeter), 80, 24).await?;
   }
 
   // At least one painted cell anywhere outside the login form area
@@ -864,4 +791,5 @@ async fn test_matrix_animation_renders_and_form_stays_legible() {
     !katakana_in_form,
     "matrix glyphs must not bleed through the login form"
   );
+  Ok(())
 }

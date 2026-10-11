@@ -399,7 +399,7 @@ fn get_winsize(fd: i32) -> Option<(u16, u16, u16, u16)> {
 mod tests {
   use std::fs;
 
-  use tempfile::TempDir;
+  use tempfile::{TempDir, tempdir};
 
   use super::*;
 
@@ -482,38 +482,39 @@ mod tests {
     dir_name: &str,
     status: &str,
     modes: Option<&str>,
-  ) {
+  ) -> io::Result<()> {
     let connector_dir = root.path().join(dir_name);
-    fs::create_dir_all(&connector_dir).unwrap();
-    fs::write(connector_dir.join("status"), status).unwrap();
+    fs::create_dir_all(&connector_dir)?;
+    fs::write(connector_dir.join("status"), status)?;
     if let Some(m) = modes {
-      fs::write(connector_dir.join("modes"), m).unwrap();
+      fs::write(connector_dir.join("modes"), m)?;
     }
+    Ok(())
   }
 
   #[test]
-  fn test_enumerate_empty_directory() {
-    let dir = tempfile::tempdir().unwrap();
+  fn test_enumerate_empty_directory() -> io::Result<()> {
+    let dir = tempdir()?;
     let outputs = enumerate_outputs_from(dir.path());
     assert!(outputs.is_empty());
+    Ok(())
   }
 
   #[test]
   fn test_enumerate_nonexistent_directory() {
-    let outputs =
-      enumerate_outputs_from(std::path::Path::new("/nonexistent/drm/path"));
+    let outputs = enumerate_outputs_from(Path::new("/nonexistent/drm/path"));
     assert!(outputs.is_empty());
   }
 
   #[test]
-  fn test_enumerate_connected_with_resolution() {
-    let dir = tempfile::tempdir().unwrap();
+  fn test_enumerate_connected_with_resolution() -> io::Result<()> {
+    let dir = tempdir()?;
     make_connector(
       &dir,
       "card0-DP-1",
       "connected\n",
       Some("1920x1080\n1280x720\n"),
-    );
+    )?;
 
     let outputs = enumerate_outputs_from(dir.path());
     assert_eq!(outputs.len(), 1);
@@ -523,12 +524,13 @@ mod tests {
     assert_eq!(o.card, "card0");
     assert!(o.connected);
     assert_eq!(o.native_resolution, Some((1920, 1080)));
+    Ok(())
   }
 
   #[test]
-  fn test_enumerate_disconnected_no_modes() {
-    let dir = tempfile::tempdir().unwrap();
-    make_connector(&dir, "card1-HDMI-A-1", "disconnected\n", None);
+  fn test_enumerate_disconnected_no_modes() -> io::Result<()> {
+    let dir = tempdir()?;
+    make_connector(&dir, "card1-HDMI-A-1", "disconnected\n", None)?;
 
     let outputs = enumerate_outputs_from(dir.path());
     assert_eq!(outputs.len(), 1);
@@ -538,37 +540,40 @@ mod tests {
     assert_eq!(o.card, "card1");
     assert!(!o.connected);
     assert_eq!(o.native_resolution, None);
+    Ok(())
   }
 
   #[test]
-  fn test_enumerate_skips_entries_without_status_file() {
-    let dir = tempfile::tempdir().unwrap();
+  fn test_enumerate_skips_entries_without_status_file() -> io::Result<()> {
+    let dir = tempdir()?;
     // Directory named like a connector but missing `status`
-    fs::create_dir(dir.path().join("card0-DP-2")).unwrap();
+    fs::create_dir(dir.path().join("card0-DP-2"))?;
 
     let outputs = enumerate_outputs_from(dir.path());
     assert!(outputs.is_empty());
+    Ok(())
   }
 
   #[test]
-  fn test_enumerate_skips_non_card_entries() {
-    let dir = tempfile::tempdir().unwrap();
+  fn test_enumerate_skips_non_card_entries() -> io::Result<()> {
+    let dir = tempdir()?;
     // Entry doesn't start with "card"
     let bad_dir = dir.path().join("version-DP-1");
-    fs::create_dir(&bad_dir).unwrap();
-    fs::write(bad_dir.join("status"), "connected\n").unwrap();
+    fs::create_dir(&bad_dir)?;
+    fs::write(bad_dir.join("status"), "connected\n")?;
 
     let outputs = enumerate_outputs_from(dir.path());
     assert!(outputs.is_empty());
+    Ok(())
   }
 
   #[test]
-  fn test_enumerate_sorted_by_card_then_connector() {
-    let dir = tempfile::tempdir().unwrap();
-    make_connector(&dir, "card1-DP-2", "connected\n", Some("1920x1080\n"));
-    make_connector(&dir, "card0-HDMI-A-1", "connected\n", Some("1280x720\n"));
-    make_connector(&dir, "card1-DP-1", "connected\n", Some("2560x1440\n"));
-    make_connector(&dir, "card0-DP-1", "disconnected\n", None);
+  fn test_enumerate_sorted_by_card_then_connector() -> io::Result<()> {
+    let dir = tempdir()?;
+    make_connector(&dir, "card1-DP-2", "connected\n", Some("1920x1080\n"))?;
+    make_connector(&dir, "card0-HDMI-A-1", "connected\n", Some("1280x720\n"))?;
+    make_connector(&dir, "card1-DP-1", "connected\n", Some("2560x1440\n"))?;
+    make_connector(&dir, "card0-DP-1", "disconnected\n", None)?;
 
     let outputs = enumerate_outputs_from(dir.path());
     assert_eq!(outputs.len(), 4);
@@ -580,74 +585,86 @@ mod tests {
     assert_eq!(outputs[2].connector, "DP-1");
     assert_eq!(outputs[3].card, "card1");
     assert_eq!(outputs[3].connector, "DP-2");
+    Ok(())
   }
 
   #[test]
-  fn test_enumerate_file_not_directory() {
-    let dir = tempfile::tempdir().unwrap();
+  fn test_enumerate_file_not_directory() -> io::Result<()> {
+    let dir = tempdir()?;
     // A plain file named like a connector must be skipped; the `status` path
     // inside it cannot exist.
-    fs::write(dir.path().join("card0-DP-1"), "not a directory").unwrap();
+    fs::write(dir.path().join("card0-DP-1"), "not a directory")?;
     let outputs = enumerate_outputs_from(dir.path());
     assert!(outputs.is_empty());
+    Ok(())
   }
 
   #[test]
-  fn test_enumerate_empty_modes_file() {
-    let dir = tempfile::tempdir().unwrap();
-    make_connector(&dir, "card0-DP-1", "connected\n", Some(""));
+  fn test_enumerate_empty_modes_file() -> io::Result<()> {
+    let dir = tempdir()?;
+    make_connector(&dir, "card0-DP-1", "connected\n", Some(""))?;
     let outputs = enumerate_outputs_from(dir.path());
     assert_eq!(outputs.len(), 1);
     // Empty modes file produces no native resolution
     assert_eq!(outputs[0].native_resolution, None);
+    Ok(())
   }
 
   #[test]
-  fn test_enumerate_garbage_modes_line() {
-    let dir = tempfile::tempdir().unwrap();
+  fn test_enumerate_garbage_modes_line() -> io::Result<()> {
+    let dir = tempdir()?;
     make_connector(
       &dir,
       "card0-DP-1",
       "connected\n",
       Some("not_a_resolution\n1920x1080\n"),
-    );
+    )?;
     let outputs = enumerate_outputs_from(dir.path());
     assert_eq!(outputs.len(), 1);
     // First line is unparseable; falls back to None
     assert_eq!(outputs[0].native_resolution, None);
+    Ok(())
   }
 
   #[test]
-  fn test_enumerate_modes_whitespace_only_first_line() {
-    let dir = tempfile::tempdir().unwrap();
-    make_connector(&dir, "card0-DP-1", "connected\n", Some("   \n1920x1080\n"));
+  fn test_enumerate_modes_whitespace_only_first_line() -> io::Result<()> {
+    let dir = tempdir()?;
+    make_connector(
+      &dir,
+      "card0-DP-1",
+      "connected\n",
+      Some("   \n1920x1080\n"),
+    )?;
     let outputs = enumerate_outputs_from(dir.path());
     assert_eq!(outputs[0].native_resolution, None);
+    Ok(())
   }
 
   #[test]
-  fn test_enumerate_status_case_sensitive() {
-    let dir = tempfile::tempdir().unwrap();
+  fn test_enumerate_status_case_sensitive() -> io::Result<()> {
+    let dir = tempdir()?;
     // "Connected" (capital C) must not be treated as connected
-    make_connector(&dir, "card0-DP-1", "Connected\n", None);
+    make_connector(&dir, "card0-DP-1", "Connected\n", None)?;
     let outputs = enumerate_outputs_from(dir.path());
     assert_eq!(outputs.len(), 1);
     assert!(!outputs[0].connected);
+    Ok(())
   }
 
   #[test]
-  fn test_enumerate_status_crlf() {
-    let dir = tempfile::tempdir().unwrap();
+  fn test_enumerate_status_crlf() -> io::Result<()> {
+    let dir = tempdir()?;
     // CRLF line endings: trim() strips both \r and \n
-    make_connector(&dir, "card0-DP-1", "connected\r\n", None);
+    make_connector(&dir, "card0-DP-1", "connected\r\n", None)?;
     let outputs = enumerate_outputs_from(dir.path());
     assert_eq!(outputs.len(), 1);
     assert!(outputs[0].connected);
+    Ok(())
   }
 
   #[test]
-  fn test_enumerate_connector_name_with_multiple_dashes() {
-    let dir = tempfile::tempdir().unwrap();
+  fn test_enumerate_connector_name_with_multiple_dashes() -> io::Result<()> {
+    let dir = tempdir()?;
     // Real DRM names like "HDMI-A-1" have multiple dashes; everything after
     // the first dash is the connector name.
     make_connector(
@@ -655,37 +672,40 @@ mod tests {
       "card0-DisplayPort-2",
       "connected\n",
       Some("2560x1440\n"),
-    );
+    )?;
     let outputs = enumerate_outputs_from(dir.path());
     assert_eq!(outputs.len(), 1);
     assert_eq!(outputs[0].connector, "DisplayPort-2");
     assert_eq!(outputs[0].card, "card0");
+    Ok(())
   }
 
   #[test]
-  fn test_enumerate_entry_with_no_dash_is_skipped() {
-    let dir = tempfile::tempdir().unwrap();
+  fn test_enumerate_entry_with_no_dash_is_skipped() -> io::Result<()> {
+    let dir = tempdir()?;
     // A plain "card0" entry has no dash so find('-') returns None and is
     // skipped
     let no_dash = dir.path().join("card0");
-    fs::create_dir(&no_dash).unwrap();
-    fs::write(no_dash.join("status"), "connected\n").unwrap();
+    fs::create_dir(&no_dash)?;
+    fs::write(no_dash.join("status"), "connected\n")?;
     let outputs = enumerate_outputs_from(dir.path());
     assert!(outputs.is_empty());
+    Ok(())
   }
 
   #[test]
-  fn test_enumerate_modes_first_line_is_native() {
-    let dir = tempfile::tempdir().unwrap();
+  fn test_enumerate_modes_first_line_is_native() -> io::Result<()> {
+    let dir = tempdir()?;
     // The first listed mode is treated as the preferred/native resolution.
     make_connector(
       &dir,
       "card0-DP-1",
       "connected\n",
       Some("2560x1440\n1920x1080\n1280x720\n"),
-    );
+    )?;
 
     let outputs = enumerate_outputs_from(dir.path());
     assert_eq!(outputs[0].native_resolution, Some((2560, 1440)));
+    Ok(())
   }
 }

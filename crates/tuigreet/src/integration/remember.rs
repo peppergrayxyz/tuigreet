@@ -1,5 +1,8 @@
+use std::io;
+
 use crossterm::event::KeyCode;
 use libgreetd_stub::SessionOptions;
+use tokio::task::spawn;
 
 use super::common::IntegrationRunner;
 use crate::ui::{
@@ -8,51 +11,51 @@ use crate::ui::{
 };
 
 #[tokio::test]
-async fn remember_username() {
+async fn remember_username() -> io::Result<()> {
   let opts = SessionOptions {
     username: "apognu".to_string(),
     password: "password".to_string(),
     mfa:      false,
   };
 
-  let mut runner = IntegrationRunner::new(
+  let runner = IntegrationRunner::new(
     opts,
     Some(|greeter| {
       greeter.remember = true;
       greeter.username = MaskedString::from("apognu".to_string(), None);
     }),
-  )
-  .await;
+  )?;
 
-  let events = tokio::task::spawn({
-    let mut runner = runner.clone();
+  let events = spawn({
+    let runner = runner.clone();
 
     async move {
-      runner.wait_until_buffer_contains("Username:").await;
+      runner.wait_until_buffer_contains("Username:").await?;
 
-      assert!(runner.output().await.contains("Username: apognu"));
+      assert!(runner.output().await?.contains("Username: apognu"));
 
-      runner.wait_until_buffer_contains("Password:").await;
-      runner.send_key(KeyCode::Esc).await;
-      runner.wait_for_render().await;
+      runner.wait_until_buffer_contains("Password:").await?;
+      runner.send_key(KeyCode::Esc).await?;
+      runner.wait_for_render().await?;
 
-      assert!(runner.output().await.contains("Username:       "));
-      assert!(!runner.output().await.contains("Password:"));
+      assert!(runner.output().await?.contains("Username:       "));
+      assert!(!runner.output().await?.contains("Password:"));
+      Ok(())
     }
   });
 
-  runner.join_until_end(events).await;
+  runner.join_until_end(events).await
 }
 
 #[tokio::test]
-async fn remember_username_with_sole_user_in_menu() {
+async fn remember_username_with_sole_user_in_menu() -> io::Result<()> {
   let opts = SessionOptions {
     username: "apognu".to_string(),
     password: "password".to_string(),
     mfa:      false,
   };
 
-  let mut runner = IntegrationRunner::new(
+  let runner = IntegrationRunner::new(
     opts,
     Some(|greeter| {
       greeter.remember = true;
@@ -67,21 +70,20 @@ async fn remember_username_with_sole_user_in_menu() {
         selected: 0,
       };
     }),
-  )
-  .await;
+  )?;
 
-  let events = tokio::task::spawn({
-    let mut runner = runner.clone();
+  let events = spawn({
+    let runner = runner.clone();
 
     async move {
-      runner.wait_until_buffer_contains("Password:").await;
-      runner.wait_for_render().await;
+      runner.wait_until_buffer_contains("Password:").await?;
+      runner.wait_for_render().await?;
 
-      assert!(!runner.output().await.contains("Authentication failed"));
+      assert!(!runner.output().await?.contains("Authentication failed"));
 
-      runner.send_text("password").await;
+      runner.send_text("password").await
     }
   });
 
-  runner.join_until_client_exit(events).await;
+  runner.join_until_client_exit(events).await
 }

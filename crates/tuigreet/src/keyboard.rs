@@ -1,4 +1,4 @@
-use std::{error::Error, sync::Arc};
+use std::{error::Error, io, sync::Arc};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use greetd_ipc::Request;
@@ -35,7 +35,8 @@ use crate::{
 /// * `ipc` - IPC client for greetd communication
 ///
 /// # Errors
-/// Returns error if IPC communication fails
+/// Returns an error if cursor arithmetic overflows or the cursor is outside its
+/// input buffer.
 pub async fn handle(
   greeter: Arc<RwLock<Greeter>>,
   input: KeyEvent,
@@ -56,8 +57,7 @@ pub async fn handle(
     } => {
       match greeter.mode {
         Mode::Username => greeter.username = MaskedString::default(),
-        Mode::Password => greeter.buffer = String::new(),
-        Mode::Command => greeter.buffer = String::new(),
+        Mode::Password | Mode::Command => greeter.buffer = String::new(),
         _ => {},
       }
     },
@@ -104,11 +104,21 @@ pub async fn handle(
     KeyEvent {
       code: KeyCode::Left,
       ..
-    } => greeter.cursor_offset -= 1,
+    } => {
+      greeter.cursor_offset =
+        greeter.cursor_offset.checked_sub(1).ok_or_else(|| {
+          io::Error::new(io::ErrorKind::InvalidInput, "cursor offset underflow")
+        })?;
+    },
     KeyEvent {
       code: KeyCode::Right,
       ..
-    } => greeter.cursor_offset += 1,
+    } => {
+      greeter.cursor_offset =
+        greeter.cursor_offset.checked_add(1).ok_or_else(|| {
+          io::Error::new(io::ErrorKind::InvalidInput, "cursor offset overflow")
+        })?;
+    },
 
     // F2 will display the command entry prompt. If we are already in one of the
     // popup screens, we set the previous screen as being the current previous
@@ -257,7 +267,8 @@ pub async fn handle(
         }
       };
 
-      greeter.cursor_offset = -(value.chars().count() as i16);
+      greeter.cursor_offset = -isize::try_from(value.chars().count())
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     },
 
     // ^A should go to the end of the current prompt
@@ -302,8 +313,6 @@ pub async fn handle(
           greeter.buffer = greeter.previous_buffer.take().unwrap_or_default();
           greeter.mode = Mode::Users;
         },
-
-        Mode::Username => {},
 
         Mode::Password => {
           greeter.working = true;
@@ -397,7 +406,7 @@ pub async fn handle(
     KeyEvent {
       code: KeyCode::Char(c),
       ..
-    } => insert_key(&mut greeter, c).await,
+    } => insert_key(&mut greeter, c)?,
 
     // Handle deletion of characters.
     KeyEvent {
@@ -407,77 +416,73 @@ pub async fn handle(
     | KeyEvent {
       code: KeyCode::Delete,
       ..
-    } => delete_key(&mut greeter, input.code).await,
+    } => delete_key(&mut greeter, input.code)?,
 
     _ => {},
   }
+  drop(greeter);
 
   Ok(())
 }
 
 // Handle insertion of characters into the proper buffer, depending on the
 // current mode and the position of the cursor.
-async fn insert_key(greeter: &mut Greeter, c: char) {
+fn insert_key(greeter: &mut Greeter, c: char) -> io::Result<()> {
   let value = match greeter.mode {
-    Mode::Username => &greeter.username.value,
-    Mode::Password => &greeter.buffer,
-    Mode::Command => &greeter.buffer,
-    _ => return,
+    Mode::Username => &mut greeter.username.value,
+    Mode::Password | Mode::Command => &mut greeter.buffer,
+    _ => return Ok(()),
   };
+  let index = cursor_index(value, greeter.cursor_offset)?;
+  let byte_index = value
+    .char_indices()
+    .nth(index)
+    .map_or(value.len(), |(byte, _)| byte);
+  value.insert(byte_index, c);
+  Ok(())
+}
 
-  let index = (value.chars().count() as i16 + greeter.cursor_offset) as usize;
-  let left = value.chars().take(index);
-  let right = value.chars().skip(index);
-
-  let value = left.chain(std::iter::once(c)).chain(right).collect();
-  let mode = greeter.mode;
-
-  match mode {
-    Mode::Username => greeter.username.value = value,
-    Mode::Password => greeter.buffer = value,
-    Mode::Command => greeter.buffer = value,
-    _ => {},
-  }
+fn cursor_index(value: &str, offset: isize) -> io::Result<usize> {
+  let length = value.chars().count();
+  length
+    .checked_add_signed(offset)
+    .filter(|index| *index <= length)
+    .ok_or_else(|| {
+      io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "cursor is outside the input buffer",
+      )
+    })
 }
 
 // Handle deletion of characters from a prompt into the proper buffer, depending
 // on the current mode, whether Backspace or Delete was pressed and the position
 // of the cursor.
-async fn delete_key(greeter: &mut Greeter, key: KeyCode) {
+fn delete_key(greeter: &mut Greeter, key: KeyCode) -> io::Result<()> {
   let value = match greeter.mode {
-    Mode::Username => &greeter.username.value,
-    Mode::Password => &greeter.buffer,
-    Mode::Command => &greeter.buffer,
-    _ => return,
+    Mode::Username => &mut greeter.username.value,
+    Mode::Password | Mode::Command => &mut greeter.buffer,
+    _ => return Ok(()),
   };
-
+  let cursor = cursor_index(value, greeter.cursor_offset)?;
   let index = match key {
     KeyCode::Backspace => {
-      (value.chars().count() as i16 + greeter.cursor_offset - 1) as usize
+      let Some(index) = cursor.checked_sub(1) else {
+        return Ok(());
+      };
+      index
     },
-    KeyCode::Delete => {
-      (value.chars().count() as i16 + greeter.cursor_offset) as usize
-    },
-    _ => 0,
+    KeyCode::Delete => cursor,
+    _ => return Ok(()),
   };
 
-  if value.chars().nth(index).is_some() {
-    let left = value.chars().take(index);
-    let right = value.chars().skip(index + 1);
-
-    let value = left.chain(right).collect();
-
-    match greeter.mode {
-      Mode::Username => greeter.username.value = value,
-      Mode::Password => greeter.buffer = value,
-      Mode::Command => greeter.buffer = value,
-      _ => return,
-    }
-
+  if let Some((byte_index, _)) = value.char_indices().nth(index) {
+    value.remove(byte_index);
     if key == KeyCode::Delete {
       greeter.cursor_offset += 1;
     }
   }
+  Ok(())
 }
 
 // Creates a `greetd` session for the provided username.
@@ -519,13 +524,13 @@ async fn validate_username(greeter: &mut Greeter, ipc: &Ipc) {
 
 #[cfg(test)]
 mod test {
-  use std::sync::Arc;
+  use std::{error::Error, sync::Arc};
 
   use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
   use tokio::sync::RwLock;
   use tuigreet_types::Mode;
 
-  use super::handle;
+  use super::{delete_key, handle, insert_key};
   use crate::{
     Greeter,
     ipc::Ipc,
@@ -538,7 +543,7 @@ mod test {
   };
 
   #[tokio::test]
-  async fn ctrl_u() {
+  async fn ctrl_u() -> Result<(), Box<dyn Error>> {
     let greeter = Arc::new(RwLock::new(Greeter::default()));
 
     {
@@ -547,18 +552,18 @@ mod test {
       greeter.username = MaskedString::from("apognu".to_string(), None);
     }
 
-    let result = handle(
-      greeter.clone(),
+    handle(
+      Arc::clone(&greeter),
       KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
       Ipc::new(),
     )
-    .await;
+    .await?;
 
     {
       let status = greeter.read().await;
 
-      assert!(matches!(result, Ok(())));
       assert_eq!(status.username.value, String::new());
+      drop(status);
     }
 
     {
@@ -567,18 +572,18 @@ mod test {
       greeter.buffer = "password".to_string();
     }
 
-    let result = handle(
-      greeter.clone(),
+    handle(
+      Arc::clone(&greeter),
       KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
       Ipc::new(),
     )
-    .await;
+    .await?;
 
     {
       let status = greeter.read().await;
 
-      assert!(matches!(result, Ok(())));
       assert_eq!(status.buffer, String::new());
+      drop(status);
     }
 
     {
@@ -587,23 +592,24 @@ mod test {
       greeter.buffer = "newcommand".to_string();
     }
 
-    let result = handle(
-      greeter.clone(),
+    handle(
+      Arc::clone(&greeter),
       KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
       Ipc::new(),
     )
-    .await;
+    .await?;
 
     {
       let status = greeter.read().await;
 
-      assert!(matches!(result, Ok(())));
       assert_eq!(status.buffer, String::new());
+      drop(status);
     }
+    Ok(())
   }
 
   #[tokio::test]
-  async fn escape() {
+  async fn escape() -> Result<(), Box<dyn Error>> {
     let greeter = Arc::new(RwLock::new(Greeter::default()));
 
     {
@@ -615,21 +621,21 @@ mod test {
       greeter.cursor_offset = 2;
     }
 
-    let result = handle(
-      greeter.clone(),
+    handle(
+      Arc::clone(&greeter),
       KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
       Ipc::new(),
     )
-    .await;
+    .await?;
 
     {
       let status = greeter.read().await;
 
-      assert!(matches!(result, Ok(())));
       assert_eq!(status.mode, Mode::Username);
       assert_eq!(status.buffer, "apognu".to_string());
       assert!(status.previous_buffer.is_none());
       assert_eq!(status.cursor_offset, 0);
+      drop(status);
     }
 
     for mode in [Mode::Users, Mode::Sessions, Mode::Power] {
@@ -639,63 +645,65 @@ mod test {
         greeter.mode = mode;
       }
 
-      let result = handle(
-        greeter.clone(),
+      handle(
+        Arc::clone(&greeter),
         KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
         Ipc::new(),
       )
-      .await;
+      .await?;
 
       {
         let status = greeter.read().await;
 
-        assert!(matches!(result, Ok(())));
         assert_eq!(status.mode, Mode::Username);
+        drop(status);
       }
     }
+    Ok(())
   }
 
   #[tokio::test]
-  async fn left_right() {
+  async fn left_right() -> Result<(), Box<dyn Error>> {
     let greeter = Arc::new(RwLock::new(Greeter::default()));
 
-    let result = handle(
-      greeter.clone(),
+    handle(
+      Arc::clone(&greeter),
       KeyEvent::new(KeyCode::Left, KeyModifiers::empty()),
       Ipc::new(),
     )
-    .await;
+    .await?;
 
     {
       let status = greeter.read().await;
 
-      assert!(matches!(result, Ok(())));
       assert_eq!(status.cursor_offset, -1);
+      drop(status);
     }
 
-    let _ = handle(
-      greeter.clone(),
+    handle(
+      Arc::clone(&greeter),
       KeyEvent::new(KeyCode::Right, KeyModifiers::empty()),
       Ipc::new(),
     )
-    .await;
-    let result = handle(
-      greeter.clone(),
+    .await?;
+    handle(
+      Arc::clone(&greeter),
       KeyEvent::new(KeyCode::Right, KeyModifiers::empty()),
       Ipc::new(),
     )
-    .await;
+    .await?;
 
     {
       let status = greeter.read().await;
 
-      assert!(matches!(result, Ok(())));
       assert_eq!(status.cursor_offset, 1);
+      drop(status);
     }
+    Ok(())
   }
 
   #[tokio::test]
-  async fn f2() {
+  async fn f2() -> Result<(), Box<dyn Error>> {
     let greeter = Arc::new(RwLock::new(Greeter::default()));
 
     {
@@ -705,20 +713,20 @@ mod test {
       greeter.session_source = SessionSource::Command("thecommand".to_string());
     }
 
-    let result = handle(
-      greeter.clone(),
+    handle(
+      Arc::clone(&greeter),
       KeyEvent::new(KeyCode::F(2), KeyModifiers::empty()),
       Ipc::new(),
     )
-    .await;
+    .await?;
 
     {
       let status = greeter.read().await;
 
-      assert!(matches!(result, Ok(())));
       assert_eq!(status.mode, Mode::Command);
       assert_eq!(status.previous_buffer, Some("apognu".to_string()));
       assert_eq!(status.buffer, "thecommand".to_string());
+      drop(status);
     }
 
     for mode in [Mode::Users, Mode::Sessions, Mode::Power] {
@@ -728,25 +736,26 @@ mod test {
         greeter.mode = mode;
       }
 
-      let result = handle(
-        greeter.clone(),
+      handle(
+        Arc::clone(&greeter),
         KeyEvent::new(KeyCode::F(2), KeyModifiers::empty()),
         Ipc::new(),
       )
-      .await;
+      .await?;
 
       {
         let status = greeter.read().await;
 
-        assert!(matches!(result, Ok(())));
         assert_eq!(status.mode, Mode::Command);
         assert_eq!(status.previous_mode, Mode::Username);
+        drop(status);
       }
     }
+    Ok(())
   }
 
   #[tokio::test]
-  async fn f_menu() {
+  async fn f_menu() -> Result<(), Box<dyn Error>> {
     let greeter = Arc::new(RwLock::new(Greeter::default()));
 
     {
@@ -769,19 +778,19 @@ mod test {
         greeter.buffer = "apognu".to_string();
       }
 
-      let result = handle(
-        greeter.clone(),
+      handle(
+        Arc::clone(&greeter),
         KeyEvent::new(key, KeyModifiers::empty()),
         Ipc::new(),
       )
-      .await;
+      .await?;
 
       {
         let status = greeter.read().await;
 
-        assert!(matches!(result, Ok(())));
         assert_eq!(status.mode, mode);
         assert_eq!(status.buffer, "apognu".to_string());
+        drop(status);
       }
 
       for mode in [Mode::Users, Mode::Sessions, Mode::Power] {
@@ -791,26 +800,27 @@ mod test {
           greeter.mode = mode;
         }
 
-        let result = handle(
-          greeter.clone(),
+        handle(
+          Arc::clone(&greeter),
           KeyEvent::new(KeyCode::F(2), KeyModifiers::empty()),
           Ipc::new(),
         )
-        .await;
+        .await?;
 
         {
           let status = greeter.read().await;
 
-          assert!(matches!(result, Ok(())));
           assert_eq!(status.mode, Mode::Command);
           assert_eq!(status.previous_mode, Mode::Username);
+          drop(status);
         }
       }
     }
+    Ok(())
   }
 
   #[tokio::test]
-  async fn f_menu_rebinded() {
+  async fn f_menu_rebinded() -> Result<(), Box<dyn Error>> {
     let greeter = Arc::new(RwLock::new(Greeter::default()));
 
     {
@@ -835,19 +845,19 @@ mod test {
         greeter.buffer = "apognu".to_string();
       }
 
-      let result = handle(
-        greeter.clone(),
+      handle(
+        Arc::clone(&greeter),
         KeyEvent::new(key, KeyModifiers::empty()),
         Ipc::new(),
       )
-      .await;
+      .await?;
 
       {
         let status = greeter.read().await;
 
-        assert!(matches!(result, Ok(())));
         assert_eq!(status.mode, mode);
         assert_eq!(status.buffer, "apognu".to_string());
+        drop(status);
       }
 
       for mode in [Mode::Users, Mode::Sessions, Mode::Power] {
@@ -857,26 +867,27 @@ mod test {
           greeter.mode = mode;
         }
 
-        let result = handle(
-          greeter.clone(),
+        handle(
+          Arc::clone(&greeter),
           KeyEvent::new(KeyCode::F(3), KeyModifiers::empty()),
           Ipc::new(),
         )
-        .await;
+        .await?;
 
         {
           let status = greeter.read().await;
 
-          assert!(matches!(result, Ok(())));
           assert_eq!(status.mode, Mode::Command);
           assert_eq!(status.previous_mode, Mode::Username);
+          drop(status);
         }
       }
     }
+    Ok(())
   }
 
   #[tokio::test]
-  async fn empty_menu_does_not_open_or_panic() {
+  async fn empty_menu_does_not_open_or_panic() -> Result<(), Box<dyn Error>> {
     let greeter = Arc::new(RwLock::new(Greeter::default()));
 
     {
@@ -885,13 +896,12 @@ mod test {
     }
 
     // F3 must not flip into an empty sessions menu.
-    let result = handle(
-      greeter.clone(),
+    handle(
+      Arc::clone(&greeter),
       KeyEvent::new(KeyCode::F(3), KeyModifiers::empty()),
       Ipc::new(),
     )
-    .await;
-    assert!(matches!(result, Ok(())));
+    .await?;
     assert_eq!(greeter.read().await.mode, Mode::Username);
 
     // Force-enter the empty sessions menu and verify Down is a no-op rather
@@ -901,18 +911,18 @@ mod test {
       greeter.mode = Mode::Sessions;
     }
 
-    let result = handle(
-      greeter.clone(),
+    handle(
+      Arc::clone(&greeter),
       KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
       Ipc::new(),
     )
-    .await;
-    assert!(matches!(result, Ok(())));
+    .await?;
     assert_eq!(greeter.read().await.sessions.selected, 0);
+    Ok(())
   }
 
   #[tokio::test]
-  async fn background_switcher_selects_kind() {
+  async fn background_switcher_selects_kind() -> Result<(), Box<dyn Error>> {
     use crate::ui::{
       background::Background,
       bg_animation::{self as animation, KINDS, Kind},
@@ -945,38 +955,40 @@ mod test {
     }
 
     // Open background menu
-    let _ = handle(
-      greeter.clone(),
+    handle(
+      Arc::clone(&greeter),
       KeyEvent::new(KeyCode::F(4), KeyModifiers::empty()),
       Ipc::new(),
     )
-    .await;
+    .await?;
     {
       let g = greeter.read().await;
       assert_eq!(g.mode, Mode::Background);
       assert_eq!(g.previous_mode, Mode::Username);
       assert_eq!(g.backgrounds.selected, 0);
+      drop(g);
     }
 
     // Move selection
-    let _ = handle(
-      greeter.clone(),
+    handle(
+      Arc::clone(&greeter),
       KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
       Ipc::new(),
     )
-    .await;
+    .await?;
     {
       let g = greeter.read().await;
       assert_eq!(g.backgrounds.selected, 1);
+      drop(g);
     }
 
     // Apply the selection
-    let _ = handle(
-      greeter.clone(),
+    handle(
+      Arc::clone(&greeter),
       KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
       Ipc::new(),
     )
-    .await;
+    .await?;
     {
       let g = greeter.read().await;
       assert_eq!(g.mode, Mode::Username);
@@ -984,27 +996,28 @@ mod test {
         g.animation.is_some(),
         "selecting Doom should set an animation"
       );
+      drop(g);
     }
 
     // Select "None" to clear
-    let _ = handle(
-      greeter.clone(),
+    handle(
+      Arc::clone(&greeter),
       KeyEvent::new(KeyCode::F(4), KeyModifiers::empty()),
       Ipc::new(),
     )
-    .await;
-    let _ = handle(
-      greeter.clone(),
+    .await?;
+    handle(
+      Arc::clone(&greeter),
       KeyEvent::new(KeyCode::Up, KeyModifiers::empty()),
       Ipc::new(),
     )
-    .await;
-    let _ = handle(
-      greeter.clone(),
+    .await?;
+    handle(
+      Arc::clone(&greeter),
       KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
       Ipc::new(),
     )
-    .await;
+    .await?;
     {
       let g = greeter.read().await;
       assert_eq!(g.mode, Mode::Username);
@@ -1012,11 +1025,13 @@ mod test {
         g.animation.is_none(),
         "selecting None should clear the animation"
       );
+      drop(g);
     }
+    Ok(())
   }
 
   #[tokio::test]
-  async fn ctrl_a_e() {
+  async fn ctrl_a_e() -> Result<(), Box<dyn Error>> {
     let greeter = Arc::new(RwLock::new(Greeter::default()));
 
     {
@@ -1025,32 +1040,76 @@ mod test {
       greeter.buffer = "123456789".to_string();
     }
 
-    let result = handle(
-      greeter.clone(),
+    handle(
+      Arc::clone(&greeter),
       KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
       Ipc::new(),
     )
-    .await;
+    .await?;
 
     {
       let status = greeter.read().await;
 
-      assert!(matches!(result, Ok(())));
       assert_eq!(status.cursor_offset, -9);
+      drop(status);
     }
 
-    let result = handle(
-      greeter.clone(),
+    handle(
+      Arc::clone(&greeter),
       KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL),
       Ipc::new(),
     )
-    .await;
+    .await?;
 
     {
       let status = greeter.read().await;
 
-      assert!(matches!(result, Ok(())));
       assert_eq!(status.cursor_offset, 0);
+      drop(status);
     }
+    Ok(())
+  }
+
+  #[test]
+  fn editing_preserves_unicode_cursor_boundaries() -> Result<(), Box<dyn Error>>
+  {
+    let mut greeter = Greeter::default();
+    greeter.mode = Mode::Command;
+    greeter.buffer = "a🦀é".into();
+    greeter.cursor_offset = -1;
+
+    insert_key(&mut greeter, '界')?;
+    assert_eq!(greeter.buffer, "a🦀界é");
+    assert_eq!(greeter.cursor_offset, -1);
+    delete_key(&mut greeter, KeyCode::Backspace)?;
+    assert_eq!(greeter.buffer, "a🦀é");
+    delete_key(&mut greeter, KeyCode::Delete)?;
+    assert_eq!(greeter.buffer, "a🦀");
+    assert_eq!(greeter.cursor_offset, 0);
+
+    delete_key(&mut greeter, KeyCode::Delete)?;
+    assert_eq!(greeter.buffer, "a🦀");
+    greeter.cursor_offset = -2;
+    delete_key(&mut greeter, KeyCode::Backspace)?;
+    assert_eq!(greeter.buffer, "a🦀");
+    greeter.cursor_offset = -3;
+    assert!(insert_key(&mut greeter, 'x').is_err());
+    assert_eq!(greeter.buffer, "a🦀");
+    Ok(())
+  }
+
+  #[test]
+  fn editing_supports_buffers_beyond_i16_coordinates()
+  -> Result<(), Box<dyn Error>> {
+    let mut greeter = Greeter::default();
+    greeter.mode = Mode::Command;
+    greeter.buffer = "a".repeat(32_768);
+    greeter.cursor_offset = -32_768;
+    insert_key(&mut greeter, '界')?;
+    assert_eq!(greeter.buffer, format!("界{}", "a".repeat(32_768)));
+    delete_key(&mut greeter, KeyCode::Backspace)?;
+    assert_eq!(greeter.buffer, "a".repeat(32_768));
+    assert_eq!(greeter.cursor_offset, -32_768);
+    Ok(())
   }
 }

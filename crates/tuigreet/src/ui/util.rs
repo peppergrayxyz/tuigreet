@@ -1,3 +1,5 @@
+use std::num::TryFromIntError;
+
 use ansi_to_tui::IntoText;
 use tui::{
   prelude::Rect,
@@ -129,34 +131,27 @@ pub fn get_rect_bounds(
 pub fn get_input_width(
   greeter: &Greeter,
   width: u16,
-  label: &Option<String>,
+  label: Option<&str>,
 ) -> u16 {
-  let width = std::cmp::min(greeter.width(), width);
+  let width = greeter.width().min(width);
 
-  let label_width = match label {
-    None => 0,
-    Some(label) => label.chars().count(),
-  };
+  let label_width = label.map_or(0, |label| label.chars().count());
 
   width
     .saturating_sub(u16::try_from(label_width).unwrap_or(u16::MAX))
     .saturating_sub(5)
 }
 
-pub const fn get_cursor_offset(greeter: &mut Greeter, length: usize) -> i16 {
-  let mut offset = length as i16 + greeter.cursor_offset;
-
-  if offset < 0 {
-    offset = 0;
-    greeter.cursor_offset = -(length as i16);
-  }
-
-  if offset > length as i16 {
-    offset = length as i16;
-    greeter.cursor_offset = 0;
-  }
-
-  offset
+pub fn get_cursor_offset(
+  greeter: &mut Greeter,
+  length: usize,
+) -> Result<usize, TryFromIntError> {
+  let length = isize::try_from(length)?;
+  let offset = length
+    .saturating_add(greeter.cursor_offset)
+    .clamp(0, length);
+  greeter.cursor_offset = offset - length;
+  usize::try_from(offset)
 }
 
 pub fn get_greeting_height(
@@ -238,7 +233,7 @@ mod test {
   fn tiny_width_has_no_underflow() {
     let mut greeter = Greeter::default();
     greeter.config = Greeter::options().parse(Vec::<String>::new()).ok();
-    assert_eq!(get_input_width(&greeter, 1, &Some("Username".into())), 0);
+    assert_eq!(get_input_width(&greeter, 1, Some("Username")), 0);
     assert_eq!(
       get_rect_bounds(&greeter, Rect::new(0, 0, 1, 1), 0),
       (0, 0, 1, 1)
@@ -367,7 +362,7 @@ mod test {
       .parse(&["--width", "40", "--container-padding", "1"])
       .ok();
 
-    let input_width = get_input_width(&greeter, 40, &Some("Username:".into()));
+    let input_width = get_input_width(&greeter, 40, Some("Username:"));
 
     assert_eq!(input_width, 26);
   }

@@ -88,7 +88,7 @@ pub struct Greeter {
   pub previous_mode: Mode,
   // Offset the cursor should be at from its base position for the current
   // mode.
-  pub cursor_offset: i16,
+  pub cursor_offset: isize,
 
   // Buffer to be used as a temporary editing zone for the various modes.
   // Previous buffer is saved when a transient screen has to use the buffer, to
@@ -1357,10 +1357,10 @@ impl Greeter {
   // Computes the size of the prompt to help determine where input should start.
   #[must_use]
   pub fn prompt_width(&self) -> usize {
-    match &self.prompt {
-      None => 0,
-      Some(prompt) => prompt.chars().count(),
-    }
+    self
+      .prompt
+      .as_ref()
+      .map_or(0, |prompt| prompt.chars().count())
   }
 
   // Apply configuration settings to the greeter, respecting CLI overrides

@@ -60,7 +60,10 @@ pub fn draw_with_area(
     .split(frame);
   let cursor = chunks[0];
 
-  let command_label_text = prompt_value(theme, Some(fl!("new_command")));
+  let command_label = fl!("new_command");
+  let command_label_width = u16::try_from(command_label.chars().count())?;
+  let input_width = get_input_width(greeter, width, Some(&command_label));
+  let command_label_text = prompt_value(theme, Some(command_label));
   let command_label =
     Paragraph::new(command_label_text).style(theme.of(&[Themed::Prompt]));
   let command_value_text = Span::from(&greeter.buffer);
@@ -71,18 +74,15 @@ pub fn draw_with_area(
   f.render_widget(
     command_value,
     Rect::new(
-      1 + chunks[0].x + fl!("new_command").chars().count() as u16,
+      1 + chunks[0].x + command_label_width,
       chunks[0].y,
-      get_input_width(greeter, width, &Some(fl!("new_command"))),
+      input_width,
       1,
     ),
   );
 
-  let new_command = greeter.buffer.clone();
-  let offset = get_cursor_offset(greeter, new_command.chars().count());
+  let command_length = greeter.buffer.chars().count();
+  let offset = u16::try_from(get_cursor_offset(greeter, command_length)?)?;
 
-  Ok((
-    2 + cursor.x + fl!("new_command").chars().count() as u16 + offset as u16,
-    cursor.y + 1,
-  ))
+  Ok((2 + cursor.x + command_label_width + offset, cursor.y + 1))
 }

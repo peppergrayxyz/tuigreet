@@ -29,6 +29,8 @@ use crate::{
 const GREETING_INDEX: usize = 0;
 const USERNAME_INDEX: usize = 1;
 const ANSWER_INDEX: usize = 3;
+const USERNAME_ROW: u16 = 1;
+const ANSWER_ROW: u16 = 3;
 
 pub fn draw_with_area(
   greeter: &mut Greeter,
@@ -114,13 +116,19 @@ pub fn draw_with_area(
     f.render_widget(greeting_label, chunks[GREETING_INDEX]);
   }
 
+  let username_label_text = fl!("username");
+  let username_label_width =
+    u16::try_from(username_label_text.chars().count())?;
+  let username_input_width =
+    get_input_width(greeter, width, Some(&username_label_text));
+  let prompt_width = u16::try_from(greeter.prompt_width())?;
   let username_label = if greeter.user_menu && greeter.username.value.is_empty()
   {
     let prompt_text = Span::from(fl!("select_user"));
 
     Paragraph::new(prompt_text).alignment(Alignment::Center)
   } else {
-    let username_text = prompt_value(theme, Some(fl!("username")));
+    let username_text = prompt_value(theme, Some(username_label_text));
 
     Paragraph::new(username_text)
   };
@@ -138,10 +146,9 @@ pub fn draw_with_area(
         f.render_widget(
           username_value,
           Rect::new(
-            1 + chunks[USERNAME_INDEX].x
-              + fl!("username").chars().count() as u16,
+            1 + chunks[USERNAME_INDEX].x + username_label_width,
             chunks[USERNAME_INDEX].y,
-            get_input_width(greeter, width, &Some(fl!("username"))),
+            username_input_width,
             1,
           ),
         );
@@ -193,9 +200,9 @@ pub fn draw_with_area(
           f.render_widget(
             answer_value,
             Rect::new(
-              chunks[ANSWER_INDEX].x + greeter.prompt_width() as u16,
+              chunks[ANSWER_INDEX].x + prompt_width,
               chunks[ANSWER_INDEX].y,
-              get_input_width(greeter, width, &greeter.prompt),
+              get_input_width(greeter, width, greeter.prompt.as_deref()),
               1,
             ),
           );
@@ -220,27 +227,27 @@ pub fn draw_with_area(
   match greeter.mode {
     Mode::Username => {
       let username_length = greeter.username.get().chars().count();
-      let offset = get_cursor_offset(greeter, username_length);
+      let offset = u16::try_from(get_cursor_offset(greeter, username_length)?)?;
 
       Ok((
-        2 + cursor.x + fl!("username").chars().count() as u16 + offset as u16,
-        USERNAME_INDEX as u16 + cursor.y,
+        2 + cursor.x + username_label_width + offset,
+        USERNAME_ROW + cursor.y,
       ))
     },
 
     Mode::Password => {
       let answer_length = greeter.buffer.chars().count();
-      let offset = get_cursor_offset(greeter, answer_length);
+      let offset = u16::try_from(get_cursor_offset(greeter, answer_length)?)?;
 
       if greeter.asking_for_secret && !greeter.secret_display.show() {
         Ok((
-          1 + cursor.x + greeter.prompt_width() as u16,
-          ANSWER_INDEX as u16 + prompt_padding + cursor.y - 1,
+          1 + cursor.x + prompt_width,
+          ANSWER_ROW + prompt_padding + cursor.y - 1,
         ))
       } else {
         Ok((
-          1 + cursor.x + greeter.prompt_width() as u16 + offset as u16,
-          ANSWER_INDEX as u16 + prompt_padding + cursor.y - 1,
+          1 + cursor.x + prompt_width + offset,
+          ANSWER_ROW + prompt_padding + cursor.y - 1,
         ))
       }
     },

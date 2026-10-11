@@ -538,6 +538,8 @@ fn parse_bool(value: &str) -> Result<bool, ()> {
 
 #[cfg(test)]
 mod tests {
+  use std::{error::Error, process::Command};
+
   use super::*;
 
   #[test]
@@ -559,11 +561,23 @@ mod tests {
   }
 
   #[test]
-  fn test_env_vars_processed_once_with_multiple_theme_components() {
-    unsafe {
-      env::set_var("TUIGREET_THEME", "border=red;text=blue;container=green");
-      env::set_var("TUIGREET_SESSIONS_DIRS", "/test:/usr/share");
-      env::set_var("TUIGREET_ALIGN_GREETING", "center");
+  fn test_env_vars_processed_once_with_multiple_theme_components()
+  -> Result<(), Box<dyn Error>> {
+    const CHILD_MARKER: &str = "TUIGREET_CONFIG_ENV_TEST_CHILD";
+    if env::var_os(CHILD_MARKER).is_none() {
+      let status = Command::new(env::current_exe()?)
+        .args(["--exact", "env::tests::test_env_vars_processed_once_with_multiple_theme_components", "--nocapture"])
+        .env_clear()
+        .env(CHILD_MARKER, "1")
+        .env("TUIGREET_THEME", "border=red;text=blue;container=green")
+        .env("TUIGREET_SESSIONS_DIRS", "/test:/usr/share")
+        .env("TUIGREET_ALIGN_GREETING", "center")
+        .status()?;
+      assert!(
+        status.success(),
+        "environment parsing subprocess failed: {status}"
+      );
+      return Ok(());
     }
 
     let config = load_env_variables();
@@ -580,10 +594,6 @@ mod tests {
     ]);
     assert_eq!(config.display.align_greeting, AlignGreeting::Center);
 
-    unsafe {
-      env::remove_var("TUIGREET_THEME");
-      env::remove_var("TUIGREET_SESSIONS_DIRS");
-      env::remove_var("TUIGREET_ALIGN_GREETING");
-    }
+    Ok(())
   }
 }

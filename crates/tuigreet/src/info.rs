@@ -10,6 +10,7 @@ use std::{
 
 use chrono::Local;
 use ini::Ini;
+use nix::sys::utsname::uname;
 use utmp_rs::{UtmpEntry, UtmpParser};
 use uzers::os::unix::UserExt;
 
@@ -40,7 +41,7 @@ static USER_ENUMERATION: Mutex<()> = Mutex::new(());
 fn xdg_data_dirs() -> &'static Vec<PathBuf> {
   XDG_DATA_DIRS.get_or_init(|| {
     let value = env::var("XDG_DATA_DIRS")
-      .unwrap_or("/usr/local/share:/usr/share".to_string());
+      .unwrap_or_else(|_| "/usr/local/share:/usr/share".to_string());
     env::split_paths(&value)
       .filter(|p| p.is_absolute())
       .collect()
@@ -62,10 +63,10 @@ fn default_session_paths() -> &'static Vec<(PathBuf, SessionType)> {
 }
 
 pub fn get_hostname() -> String {
-  match nix::sys::utsname::uname() {
-    Ok(uts) => uts.nodename().to_str().unwrap_or("").to_string(),
-    _ => String::new(),
-  }
+  uname().map_or_else(
+    |_| String::new(),
+    |uts| uts.nodename().to_str().unwrap_or("").to_string(),
+  )
 }
 
 pub fn get_issue() -> Option<String> {
@@ -82,8 +83,9 @@ pub fn get_issue() -> Option<String> {
     match UtmpParser::from_path("/var/run/utmp").map_or(0, |utmp| {
       utmp.into_iter().fold(0, |acc, entry| {
         match entry {
-          Ok(UtmpEntry::UserProcess { .. }) => acc + 1,
-          Ok(UtmpEntry::LoginProcess { .. }) => acc + 1,
+          Ok(
+            UtmpEntry::UserProcess { .. } | UtmpEntry::LoginProcess { .. },
+          ) => acc + 1,
           _ => acc,
         }
       })
@@ -92,7 +94,7 @@ pub fn get_issue() -> Option<String> {
       n => format!("{n} users"),
     };
 
-  let uts = nix::sys::utsname::uname();
+  let uts = uname();
   let vtnr: usize = env::var("XDG_VTNR")
     .unwrap_or_else(|_| "0".to_string())
     .parse()
@@ -274,30 +276,27 @@ pub fn get_min_max_uids(
     max_uid.unwrap_or(DEFAULT_MAX_UID),
   );
 
-  match File::open("/etc/login.defs") {
-    Err(_) => default,
-    Ok(file) => {
-      let file = BufReader::new(file);
+  File::open("/etc/login.defs").map_or(default, |file| {
+    let file = BufReader::new(file);
 
-      let uids: (u32, u32) = file.lines().fold(default, |acc, line| {
-        line.map_or(acc, |line| {
-          let mut tokens = line.split_whitespace();
+    let uids: (u32, u32) = file.lines().fold(default, |acc, line| {
+      line.map_or(acc, |line| {
+        let mut tokens = line.split_whitespace();
 
-          match (overrides, tokens.next(), tokens.next()) {
-            ((None, _), Some("UID_MIN"), Some(value)) => {
-              (value.parse::<u32>().unwrap_or(acc.0), acc.1)
-            },
-            ((_, None), Some("UID_MAX"), Some(value)) => {
-              (acc.0, value.parse::<u32>().unwrap_or(acc.1))
-            },
-            _ => acc,
-          }
-        })
-      });
+        match (overrides, tokens.next(), tokens.next()) {
+          ((None, _), Some("UID_MIN"), Some(value)) => {
+            (value.parse::<u32>().unwrap_or(acc.0), acc.1)
+          },
+          ((_, None), Some("UID_MAX"), Some(value)) => {
+            (acc.0, value.parse::<u32>().unwrap_or(acc.1))
+          },
+          _ => acc,
+        }
+      })
+    });
 
-      uids
-    },
-  }
+    uids
+  })
 }
 
 pub fn get_sessions(greeter: &Greeter) -> Result<Vec<Session>, Box<dyn Error>> {
@@ -405,9 +404,8 @@ pub fn get_battery_info() -> Option<BatteryInfo> {
     if let Ok(content) = fs::read_to_string(&capacity_path)
       && let Ok(cap) = content.trim().parse::<u8>()
     {
-      let charging = fs::read_to_string(&status_path)
-        .map(|s| s.trim() == "Charging")
-        .unwrap_or(false);
+      let charging =
+        fs::read_to_string(&status_path).is_ok_and(|s| s.trim() == "Charging");
       return Some(BatteryInfo {
         percentage: cap,
         charging,

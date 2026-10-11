@@ -3,6 +3,7 @@ use std::{
   env,
   error::Error,
   ffi::OsStr,
+  io::{self, Write},
   path::PathBuf,
   process,
   sync::Arc,
@@ -19,6 +20,9 @@ use tokio::{
   sync::{RwLock, RwLockWriteGuard, mpsc::Sender},
 };
 use tracing_appender::non_blocking::WorkerGuard;
+use tui::style::Color;
+use tuigreet_config::parser::extract_cli_config;
+#[cfg(not(test))] use tuigreet_config::parser::load_config;
 use tuigreet_theme::Theme;
 use tuigreet_types::{
   AuthStatus,
@@ -47,7 +51,7 @@ use crate::{
   },
   power::PowerOption,
   ui::{
-    background::Background,
+    background::{self, Background},
     bg_animation::{self, Animation, AnimationSpec},
     common::{masked::MaskedString, menu::Menu},
     power::Power,
@@ -217,7 +221,7 @@ impl Default for Greeter {
       time_format:                None,
       battery:                    false,
       greeting:                   None,
-      title:                      Default::default(),
+      title:                      TitleOption::default(),
       message:                    None,
       powers:                     Menu::default(),
       power_setsid:               false,
@@ -258,7 +262,7 @@ impl Greeter {
 
     greeter.powers = Menu {
       title:    fl!("title_power"),
-      options:  Default::default(),
+      options:  Vec::new(),
       selected: 0,
     };
 
@@ -266,23 +270,17 @@ impl Greeter {
     {
       let args = env::args().collect::<Vec<String>>();
 
-      if let Err(err) = greeter.parse_options(&args).await {
-        eprintln!("{err}");
-        print_usage(Self::options());
+      if let Err(err) = greeter.parse_options(&args) {
+        report_output_error(writeln!(io::stderr().lock(), "{err}"));
+        report_output_error(print_usage(&Self::options()));
 
         process::exit(1);
       }
 
       // Load configuration after CLI parsing
       if !greeter.config().opt_present("no-config") {
-        let config_path = greeter
-          .config()
-          .opt_str("config")
-          .map(std::path::PathBuf::from);
-        match tuigreet_config::parser::load_config(
-          config_path.as_deref(),
-          greeter.config.as_ref(),
-        ) {
+        let config_path = greeter.config().opt_str("config").map(PathBuf::from);
+        match load_config(config_path.as_deref(), greeter.config.as_ref()) {
           Ok(config) => {
             // Validate config
             match config.validate(false) {
@@ -318,7 +316,12 @@ impl Greeter {
                     .unwrap_or_else(|_| {
                       "# Failed to serialize config".to_string()
                     });
-                  println!("{toml_str}");
+                  if let Err(error) =
+                    writeln!(io::stdout().lock(), "{toml_str}")
+                  {
+                    tracing::error!("Failed to write configuration: {error}");
+                    process::exit(1);
+                  }
                   process::exit(0);
                 }
               },
@@ -483,12 +486,13 @@ impl Greeter {
 
     // If socket is not already set (by tests), read from environment
     if self.socket.is_empty() {
-      self.socket = if let Ok(socket) = env::var("GREETD_SOCK") {
-        socket
-      } else {
-        eprintln!("GREETD_SOCK must be defined");
+      self.socket = env::var("GREETD_SOCK").unwrap_or_else(|_| {
+        report_output_error(writeln!(
+          io::stderr().lock(),
+          "GREETD_SOCK must be defined"
+        ));
         process::exit(1);
-      };
+      });
     }
 
     match UnixStream::connect(&self.socket).await {
@@ -497,7 +501,7 @@ impl Greeter {
       },
 
       Err(err) => {
-        eprintln!("{err}");
+        report_output_error(writeln!(io::stderr().lock(), "{err}"));
         process::exit(1);
       },
     }
@@ -917,11 +921,12 @@ impl Greeter {
     opts
   }
 
-  // Parses command line arguments to configured the software accordingly.
-  pub async fn parse_options<S>(
-    &mut self,
-    args: &[S],
-  ) -> Result<(), Box<dyn Error>>
+  /// Parse command line arguments and configure the greeter.
+  ///
+  /// # Errors
+  /// Returns an error for invalid options, incompatible settings, or failed CLI
+  /// output.
+  pub fn parse_options<S>(&mut self, args: &[S]) -> Result<(), Box<dyn Error>>
   where
     S: AsRef<OsStr>,
   {
@@ -933,16 +938,17 @@ impl Greeter {
     };
 
     if self.config().opt_present("help") {
-      print_usage(opts);
+      print_usage(&opts)?;
       process::exit(0);
     }
     if self.config().opt_present("version") {
-      print_version();
+      print_version()?;
       process::exit(0);
     }
 
     if self.config().opt_present("list-outputs") {
-      tuigreet_system::list_outputs();
+      tuigreet_system::list_outputs()?;
+      process::exit(0);
     }
 
     self.mock = self.config().opt_present("mock");
@@ -950,10 +956,10 @@ impl Greeter {
     if self.config().opt_present("debug") {
       self.debug = true;
 
-      self.logfile = match self.config().opt_str("debug") {
-        Some(file) => file,
-        None => DEFAULT_LOG_FILE.to_string(),
-      }
+      self.logfile = self
+        .config()
+        .opt_str("debug")
+        .unwrap_or_else(|| DEFAULT_LOG_FILE.to_string());
     }
 
     if self.config().opt_present("issue")
@@ -1022,8 +1028,10 @@ impl Greeter {
 
       if min_uid > max_uid {
         return Err(
-          "Minimum UID ({min_uid}) must not exceed maximum UID ({max_uid})"
-            .into(),
+          format!(
+            "Minimum UID ({min_uid}) must not exceed maximum UID ({max_uid})"
+          )
+          .into(),
         );
       }
 
@@ -1163,7 +1171,7 @@ impl Greeter {
       }
     }
 
-    let cli_config = tuigreet_config::parser::extract_cli_config(self.config());
+    let cli_config = extract_cli_config(self.config());
     self.set_background_from_config(&cli_config.background);
     self.populate_backgrounds_menu();
 
@@ -1173,7 +1181,7 @@ impl Greeter {
   fn populate_backgrounds_menu(&mut self) {
     let title = fl!("title_background");
     let none_label = fl!("background_none");
-    let options = crate::ui::background::options(&none_label);
+    let options = background::options(&none_label);
     // Highlight the first concrete kind when an animation is active,
     // otherwise the synthetic "None" at index 0.
     let selected = if self.animation.is_none() {
@@ -1208,7 +1216,7 @@ impl Greeter {
     if let Some(ref sender) = self.events {
       let sender = sender.clone();
       tokio::spawn(async move {
-        let _ = sender.send(crate::event::Event::Refresh).await;
+        let _ = sender.send(Event::Refresh).await;
       });
     }
   }
@@ -1235,7 +1243,7 @@ impl Greeter {
       return;
     };
 
-    let parse = |s: &Option<String>, fallback: tui::style::Color| {
+    let parse = |s: &Option<String>, fallback: Color| {
       s.as_deref()
         .and_then(bg_animation::parse_color)
         .unwrap_or(fallback)
@@ -1534,27 +1542,51 @@ fn mock_sessions() -> Vec<Session> {
   .collect()
 }
 
-fn print_usage(opts: Options) {
-  eprint!("{}", opts.usage("Usage: tuigreet [OPTIONS]"));
+fn report_output_error(result: io::Result<()>) {
+  if let Err(error) = result {
+    tracing::error!("Failed to write CLI output: {error}");
+  }
 }
 
-fn print_version() {
-  println!("tuigreet {} ({})", env!("VERSION"), env!("TARGET"));
-  println!(
+fn print_usage(opts: &Options) -> io::Result<()> {
+  write!(
+    io::stderr().lock(),
+    "{}",
+    opts.usage("Usage: tuigreet [OPTIONS]")
+  )
+}
+
+fn print_version() -> io::Result<()> {
+  let mut stdout = io::stdout().lock();
+  writeln!(stdout, "tuigreet {} ({})", env!("VERSION"), env!("TARGET"))?;
+  writeln!(
+    stdout,
     "Copyright (C) 2020 Antoine POPINEAU <https://github.com/apognu/tuigreet>."
-  );
-  println!("Maintained by NotAShelf <https://github.com/NotAShelf/tuigreet>.");
-  println!("Licensed under GPLv3+ (GNU GPL version 3 or later).");
-  println!();
-  println!(
+  )?;
+  writeln!(
+    stdout,
+    "Maintained by NotAShelf <https://github.com/NotAShelf/tuigreet>."
+  )?;
+  writeln!(
+    stdout,
+    "Licensed under GPLv3+ (GNU GPL version 3 or later)."
+  )?;
+  writeln!(stdout)?;
+  writeln!(
+    stdout,
     "This is free software, you are welcome to redistribute it under some \
      conditions."
-  );
-  println!("There is NO WARRANTY, to the extent provided by law.");
+  )?;
+  writeln!(
+    stdout,
+    "There is NO WARRANTY, to the extent provided by law."
+  )
 }
 
 #[cfg(test)]
 mod test {
+  use std::{error::Error, path::PathBuf};
+
   use tuigreet_config::Config;
   use tuigreet_types::SecretDisplay;
 
@@ -1596,13 +1628,9 @@ mod test {
   }
 
   #[test]
-  fn applying_config_replaces_session_state() {
+  fn applying_config_replaces_session_state() -> Result<(), Box<dyn Error>> {
     let mut greeter = Greeter::default();
-    greeter.config = Some(
-      Greeter::options()
-        .parse(Vec::<String>::new())
-        .expect("empty CLI parses"),
-    );
+    greeter.config = Some(Greeter::options().parse(Vec::<String>::new())?);
 
     let mut configured = Config::default();
     configured.session.command = Some("first".into());
@@ -1617,32 +1645,30 @@ mod test {
 
     assert!(matches!(greeter.session_source, SessionSource::None));
     assert_eq!(greeter.session_paths, [(
-      std::path::PathBuf::from("/second"),
+      PathBuf::from("/second"),
       SessionType::Wayland
     )]);
     assert!(greeter.session_wrapper.is_none());
     assert!(!greeter.user_menu);
     assert!(greeter.users.options.is_empty());
+    Ok(())
   }
 
   #[test]
-  fn applying_config_updates_log_file() {
+  fn applying_config_updates_log_file() -> Result<(), Box<dyn Error>> {
     let mut greeter = Greeter::default();
     let mut config = Config::default();
     config.general.log_file = "/tmp/configured-tuigreet.log".into();
-    greeter.config = Some(
-      Greeter::options()
-        .parse(Vec::<String>::new())
-        .expect("empty CLI parses"),
-    );
+    greeter.config = Some(Greeter::options().parse(Vec::<String>::new())?);
 
     greeter.apply_config(&config);
 
     assert_eq!(greeter.logfile, "/tmp/configured-tuigreet.log");
+    Ok(())
   }
 
   #[tokio::test]
-  async fn test_command_line_arguments() {
+  async fn test_command_line_arguments() -> Result<(), Box<dyn Error>> {
     let table: &[CommandLineTest] = &[
       // No arguments
       (&[], true, None),
@@ -1733,32 +1759,26 @@ mod test {
 
       match valid {
         true => {
-          assert!(
-            matches!(greeter.parse_options(opts).await, Ok(())),
-            "{opts:?} cannot be parsed"
-          );
+          greeter.parse_options(opts)?;
 
           if let Some(check) = check {
             check(&greeter);
           }
         },
-        false => assert!((greeter.parse_options(opts).await).is_err()),
+        false => assert!(greeter.parse_options(opts).is_err()),
       }
     }
+    Ok(())
   }
 
   #[tokio::test]
-  async fn test_session_paths_are_deduplicated_after_config_overlay() {
+  async fn test_session_paths_are_deduplicated_after_config_overlay()
+  -> Result<(), Box<dyn Error>> {
     let sess_dir = "/usr/share/wayland-sessions";
 
     let mut greeter = Greeter::default();
 
-    assert!(
-      greeter
-        .parse_options(&["--sessions", sess_dir])
-        .await
-        .is_ok()
-    );
+    greeter.parse_options(&["--sessions", sess_dir])?;
 
     // CLI options are merged into the configuration before it is applied, so
     // the same directory can appear several times.
@@ -1767,28 +1787,25 @@ mod test {
     greeter.apply_config(&config);
 
     assert_eq!(greeter.session_paths, [(
-      std::path::PathBuf::from(sess_dir),
+      PathBuf::from(sess_dir),
       SessionType::Wayland
     )]);
+    Ok(())
   }
 
   #[tokio::test]
-  async fn test_config_session_environments_survive_cli_overlay() {
+  async fn test_config_session_environments_survive_cli_overlay()
+  -> Result<(), Box<dyn Error>> {
     let mut greeter = Greeter::default();
 
-    assert!(
-      greeter
-        .parse_options(&[
-          "--cmd",
-          "sway",
-          "--env",
-          "XDG_CURRENT_DESKTOP=sway",
-          "--env",
-          "XDG_SESSION_TYPE=wayland",
-        ])
-        .await
-        .is_ok()
-    );
+    greeter.parse_options(&[
+      "--cmd",
+      "sway",
+      "--env",
+      "XDG_CURRENT_DESKTOP=sway",
+      "--env",
+      "XDG_SESSION_TYPE=wayland",
+    ])?;
 
     let mut config = Config::default();
     config.session.command = Some("sway".to_string());
@@ -1808,13 +1825,15 @@ mod test {
               "XDG_SESSION_TYPE=wayland".to_string()
             ]
     ));
+    Ok(())
   }
 
   #[tokio::test]
-  async fn test_config_power_options_are_applied() {
+  async fn test_config_power_options_are_applied() -> Result<(), Box<dyn Error>>
+  {
     let mut greeter = Greeter::default();
 
-    assert!(greeter.parse_options(&[] as &[&str]).await.is_ok());
+    greeter.parse_options(&[] as &[&str])?;
 
     let mut config = Config::default();
     config.power.shutdown = Some("loginctl poweroff".to_string());
@@ -1841,5 +1860,6 @@ mod test {
       power.action == PowerOption::Hibernate
         && power.command.as_deref() == Some("loginctl hibernate")
     }));
+    Ok(())
   }
 }

@@ -5,7 +5,11 @@
 /// privileges.  Terminal sizing is applied via the `TIOCSWINSZ` ioctl so
 /// that the TUI fills the physical monitor rather than the TTY's default
 /// dimensions.
-use std::{fs, process};
+use std::{
+  fs,
+  io::{self, Write},
+  path::Path,
+};
 
 #[cfg(not(test))]
 use tuigreet_config::{OutputConfig, TerminalConfig};
@@ -57,13 +61,15 @@ pub struct DrmOutput {
 ///
 /// Returns an empty list if the path does not exist or cannot be read.
 /// Entries are sorted by card name then connector name.
+#[must_use]
 pub fn enumerate_outputs() -> Vec<DrmOutput> {
-  enumerate_outputs_from(std::path::Path::new("/sys/class/drm"))
+  enumerate_outputs_from(Path::new("/sys/class/drm"))
 }
 
 /// Inner implementation of [`enumerate_outputs`] that accepts an arbitrary
 /// sysfs DRM root path, allowing unit tests to use a temporary directory.
-pub fn enumerate_outputs_from(drm_path: &std::path::Path) -> Vec<DrmOutput> {
+#[must_use]
+pub fn enumerate_outputs_from(drm_path: &Path) -> Vec<DrmOutput> {
   let mut outputs = Vec::new();
 
   let Ok(entries) = fs::read_dir(drm_path) else {
@@ -118,6 +124,7 @@ pub fn enumerate_outputs_from(drm_path: &std::path::Path) -> Vec<DrmOutput> {
 }
 
 /// Parse a resolution string of the form `"WIDTHxHEIGHT"` into `(u16, u16)`.
+#[must_use]
 pub fn parse_resolution(mode: &str) -> Option<(u16, u16)> {
   let mode = mode.trim();
   let (w_str, h_str) = mode.split_once('x')?;
@@ -127,7 +134,7 @@ pub fn parse_resolution(mode: &str) -> Option<(u16, u16)> {
   Some((w, h))
 }
 
-/// Print available DRM outputs to stdout and exit.
+/// Print available DRM outputs to stdout.
 ///
 /// Outputs are grouped by card. The format is human-readable:
 /// ```text
@@ -135,18 +142,25 @@ pub fn parse_resolution(mode: &str) -> Option<(u16, u16)> {
 ///   DP-1             connected      1920x1080
 ///   HDMI-A-1         disconnected
 /// ```
-pub fn list_outputs() -> ! {
+///
+/// # Errors
+/// Returns an error if writing to stdout fails.
+pub fn list_outputs() -> io::Result<()> {
   let outputs = enumerate_outputs();
+  let mut stdout = io::stdout().lock();
 
   if outputs.is_empty() {
-    println!("No DRM outputs found (is /sys/class/drm/ available?).");
-    process::exit(0);
+    writeln!(
+      stdout,
+      "No DRM outputs found (is /sys/class/drm/ available?)."
+    )?;
+    return Ok(());
   }
 
   let mut current_card = String::new();
   for output in &outputs {
     if output.card != current_card {
-      println!("DRM outputs ({}):", output.card);
+      writeln!(stdout, "DRM outputs ({}):", output.card)?;
       current_card.clone_from(&output.card);
     }
 
@@ -160,10 +174,14 @@ pub fn list_outputs() -> ! {
       .map(|(w, h)| format!("{w}x{h}"))
       .unwrap_or_default();
 
-    println!("  {:<16} {:<14} {}", output.connector, status, resolution);
+    writeln!(
+      stdout,
+      "  {:<16} {:<14} {}",
+      output.connector, status, resolution
+    )?;
   }
 
-  process::exit(0);
+  Ok(())
 }
 
 /// Apply terminal sizing based on `[[outputs]]` and `[terminal]` config.

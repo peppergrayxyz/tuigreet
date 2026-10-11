@@ -7,6 +7,9 @@ license.workspace      = true
 rust-version.workspace = true
 repository             = "https://github.com/notashelf/tuigreet"
 
+[lints]
+workspace = true
+
 [[bin]]
 name = "tuigreet"
 path = "src/main.rs"

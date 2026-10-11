@@ -26,13 +26,18 @@ impl LazyLoader {
 impl Deref for LazyLoader {
   type Target = FluentLanguageLoader;
 
+  #[expect(
+    clippy::expect_used,
+    reason = "the fallback locale is embedded at build time; invalid bundled \
+              translations are a packaging error"
+  )]
   fn deref(&self) -> &Self::Target {
     self.once.get_or_init(|| {
       let locales = Localizations;
       let loader = fluent_language_loader!();
       loader
         .load_languages(&locales, &[loader.fallback_language().clone()])
-        .unwrap();
+        .expect("embedded fallback translations must be valid");
 
       let _ = i18n_embed::select(
         &loader,

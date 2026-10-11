@@ -68,6 +68,11 @@ pub const DEFAULT_FPS: u32 = 2;
 const DEFAULT_LOCALE: Locale = Locale::en_US;
 
 /// Core greeter state managing authentication, UI, and session selection.
+#[expect(
+  clippy::struct_excessive_bools,
+  reason = "Independent CLI/configuration flags and authentication state are \
+            not mutually exclusive states"
+)]
 pub struct Greeter {
   pub debug:   bool,
   pub logfile: String,
@@ -254,6 +259,14 @@ impl Drop for Greeter {
 }
 
 impl Greeter {
+  #[cfg_attr(
+    test,
+    expect(
+      clippy::unused_async,
+      reason = "Tests omit startup socket connection; production awaits \
+                connect"
+    )
+  )]
   pub async fn new(events: Sender<Event>) -> Self {
     let mut greeter = Self::default();
 
@@ -507,6 +520,15 @@ impl Greeter {
     }
   }
 
+  /// Parsed CLI options.
+  ///
+  /// # Panics
+  /// Panics if called before `parse_options` initializes startup configuration.
+  #[expect(
+    clippy::expect_used,
+    reason = "CLI configuration is initialized before runtime; accessing it \
+              earlier is a programming error"
+  )]
   #[must_use]
   pub const fn config(&self) -> &Matches {
     self

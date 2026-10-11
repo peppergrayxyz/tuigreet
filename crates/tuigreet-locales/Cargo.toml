@@ -6,6 +6,9 @@ edition.workspace      = true
 license.workspace      = true
 rust-version.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 i18n-embed    = { workspace = true }
 i18n-embed-fl = { workspace = true }

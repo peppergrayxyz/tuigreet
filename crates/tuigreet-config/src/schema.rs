@@ -206,6 +206,11 @@ impl Default for SessionConfig {
 
 /// Display and visual configuration
 #[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq)]
+#[expect(
+  clippy::struct_excessive_bools,
+  reason = "Independent user-configurable display toggles form the serialized \
+            configuration schema."
+)]
 pub struct DisplayConfig {
   /// Legacy secret-mask toggle. Prefer `[secret] mode = "characters"`.
   #[serde(default, skip_serializing)]
@@ -378,6 +383,11 @@ pub struct WidgetConfig {
 
 /// Status bar item visibility configuration
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[expect(
+  clippy::struct_excessive_bools,
+  reason = "Each independently configurable status-bar item has its own \
+            serialized visibility toggle."
+)]
 pub struct StatusBarConfig {
   /// Show the ESC/Reset button
   #[serde(default = "default_true")]
@@ -656,6 +666,11 @@ fn default_log_file() -> String {
   "/tmp/tuigreet.log".to_string()
 }
 
+#[expect(
+  clippy::unnecessary_wraps,
+  reason = "Serde's default callback must return the field's Option<String> \
+            type."
+)]
 fn default_xsession_wrapper() -> Option<String> {
   Some("startx /usr/bin/env".to_string())
 }

@@ -1,10 +1,11 @@
-use std::{env, process::Command};
+use std::{env, error::Error, process::Command};
 
-fn main() {
+fn main() -> Result<(), Box<dyn Error>> {
   let version =
     git_version().unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
   println!("cargo:rustc-env=VERSION={version}");
-  println!("cargo:rustc-env=TARGET={}", env::var("TARGET").unwrap());
+  println!("cargo:rustc-env=TARGET={}", env::var("TARGET")?);
+  Ok(())
 }
 
 fn git_version() -> Option<String> {

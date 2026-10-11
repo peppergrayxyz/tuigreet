@@ -361,8 +361,7 @@ impl Greeter {
               |Session { path, .. }| {
                 path
                   .as_ref()
-                  .map(|p| regex.is_match(&p.to_string_lossy()))
-                  .unwrap_or(false)
+                  .is_some_and(|p| regex.is_match(&p.to_string_lossy()))
               },
             ) {
               greeter.sessions.selected = index;

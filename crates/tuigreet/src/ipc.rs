@@ -317,10 +317,9 @@ fn mock_response(request: &Request) -> Response {
         auth_message:      "Password: ".to_string(),
       }
     },
-    Request::PostAuthMessageResponse { .. } | Request::StartSession { .. } => {
-      Response::Success
-    },
-    Request::CancelSession => Response::Success,
+    Request::PostAuthMessageResponse { .. }
+    | Request::StartSession { .. }
+    | Request::CancelSession => Response::Success,
   }
 }
 
@@ -347,52 +346,49 @@ fn wrap_session_command<'a>(
 ) -> (Cow<'a, str>, Vec<String>) {
   let mut env: Vec<String> = vec![];
 
-  match session {
-    // If the target is a defined session, we *should* be able to deduce all the
-    // environment we need from the desktop file.
-    Some(Session {
-      slug,
-      session_type,
-      xdg_desktop_names,
-      ..
-    }) => {
-      if let Some(slug) = slug {
-        env.push(format!("XDG_SESSION_DESKTOP={slug}"));
-        env.push(format!("DESKTOP_SESSION={slug}"));
-      }
-      if *session_type != SessionType::None {
-        env.push(format!(
-          "XDG_SESSION_TYPE={}",
-          session_type.as_xdg_session_type()
-        ));
-      }
-      if let Some(xdg_desktop_names) = xdg_desktop_names {
-        env.push(format!(
-          "XDG_CURRENT_DESKTOP={}",
-          desktop_names_to_xdg(xdg_desktop_names)
-        ));
-      }
+  // If the target is a defined session, deduce its environment from the desktop
+  // file.
+  if let Some(Session {
+    slug,
+    session_type,
+    xdg_desktop_names,
+    ..
+  }) = session
+  {
+    if let Some(slug) = slug {
+      env.push(format!("XDG_SESSION_DESKTOP={slug}"));
+      env.push(format!("DESKTOP_SESSION={slug}"));
+    }
+    if *session_type != SessionType::None {
+      env.push(format!(
+        "XDG_SESSION_TYPE={}",
+        session_type.as_xdg_session_type()
+      ));
+    }
+    if let Some(xdg_desktop_names) = xdg_desktop_names {
+      env.push(format!(
+        "XDG_CURRENT_DESKTOP={}",
+        desktop_names_to_xdg(xdg_desktop_names)
+      ));
+    }
 
-      if *session_type == SessionType::X11 {
-        if let Some(ref wrap) = greeter.xsession_wrapper {
-          return (Cow::Owned(format!("{} {}", wrap, default.command())), env);
-        }
-      } else if let Some(ref wrap) = greeter.session_wrapper {
+    if *session_type == SessionType::X11 {
+      if let Some(ref wrap) = greeter.xsession_wrapper {
         return (Cow::Owned(format!("{} {}", wrap, default.command())), env);
       }
-    },
-
-    _ => {
-      // If a wrapper script is used, assume that it is able to set up the
-      // required environment.
-      if let Some(ref wrap) = greeter.session_wrapper {
-        return (Cow::Owned(format!("{} {}", wrap, default.command())), env);
-      }
-      // Otherwise, set up the environment from the provided argument.
-      if let Some(base_env) = default.env() {
-        env.append(&mut base_env.clone());
-      }
-    },
+    } else if let Some(ref wrap) = greeter.session_wrapper {
+      return (Cow::Owned(format!("{} {}", wrap, default.command())), env);
+    }
+  } else {
+    // If a wrapper script is used, assume that it is able to set up the
+    // required environment.
+    if let Some(ref wrap) = greeter.session_wrapper {
+      return (Cow::Owned(format!("{} {}", wrap, default.command())), env);
+    }
+    // Otherwise, set up the environment from the provided argument.
+    if let Some(base_env) = default.env() {
+      env.append(&mut base_env.clone());
+    }
   }
 
   (Cow::Borrowed(default.command()), env)

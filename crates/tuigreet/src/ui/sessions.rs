@@ -32,8 +32,9 @@ impl SessionSource {
   ) -> Option<&'g str> {
     match self {
       Self::None => None,
-      Self::DefaultCommand(command, _) => Some(command),
-      Self::Command(command) => Some(command),
+      Self::DefaultCommand(command, _) | Self::Command(command) => {
+        Some(command)
+      },
       Self::Session(index) => {
         greeter
           .sessions
@@ -52,8 +53,9 @@ impl SessionSource {
   ) -> Option<&'g str> {
     match self {
       Self::None => None,
-      Self::DefaultCommand(command, _) => Some(command.as_str()),
-      Self::Command(command) => Some(command.as_str()),
+      Self::DefaultCommand(command, _) | Self::Command(command) => {
+        Some(command.as_str())
+      },
       Self::Session(index) => {
         greeter
           .sessions
@@ -66,10 +68,8 @@ impl SessionSource {
 
   pub fn env<'g, 'ss: 'g>(&'ss self) -> Option<Vec<String>> {
     match self {
-      Self::None => None,
+      Self::None | Self::Command(_) | Self::Session(_) => None,
       Self::DefaultCommand(_, env) => env.clone(),
-      Self::Command(_) => None,
-      Self::Session(_) => None,
     }
   }
 }
@@ -87,7 +87,7 @@ pub enum SessionType {
 impl SessionType {
   // Returns the value that should be set in `XDG_SESSION_TYPE` when the session
   // is started.
-  pub const fn as_xdg_session_type(&self) -> &'static str {
+  pub const fn as_xdg_session_type(self) -> &'static str {
     match self {
       Self::X11 => "x11",
       Self::Wayland => "wayland",
@@ -112,6 +112,11 @@ pub struct Session {
 
   // XDG session type for the session, detected from the location of the
   // session file.
+  #[expect(
+    clippy::struct_field_names,
+    reason = "session_type identifies the XDG_SESSION_TYPE domain, not a \
+              generic Rust type"
+  )]
   pub session_type: SessionType,
 
   // Path to the session file. Used to uniquely identify sessions, since names
@@ -167,7 +172,7 @@ mod test {
   };
 
   #[test]
-  fn from_path_existing() {
+  fn from_path_existing() -> Result<(), &'static str> {
     let mut greeter = Greeter::default();
     greeter.session_source = SessionSource::Session(1);
 
@@ -192,11 +197,12 @@ mod test {
       ],
     };
 
-    let session = Session::from_path(&greeter, "/Session2Path");
+    let session = Session::from_path(&greeter, "/Session2Path")
+      .ok_or("the configured session path must be found")?;
 
-    assert!(session.is_some());
-    assert_eq!(session.unwrap().name, "Session2");
-    assert_eq!(session.unwrap().session_type, SessionType::X11);
+    assert_eq!(session.name, "Session2");
+    assert_eq!(session.session_type, SessionType::X11);
+    Ok(())
   }
 
   #[test]
@@ -229,7 +235,7 @@ mod test {
   }
 
   #[test]
-  fn distinct_session() {
+  fn distinct_session() -> Result<(), &'static str> {
     let mut greeter = Greeter::default();
     greeter.session_source = SessionSource::Session(1);
 
@@ -254,15 +260,16 @@ mod test {
       ],
     };
 
-    let session = Session::get_selected(&greeter);
+    let session = Session::get_selected(&greeter)
+      .ok_or("the selected session must be found")?;
 
-    assert!(session.is_some());
-    assert_eq!(session.unwrap().name, "Session2");
-    assert_eq!(session.unwrap().session_type, SessionType::X11);
+    assert_eq!(session.name, "Session2");
+    assert_eq!(session.session_type, SessionType::X11);
+    Ok(())
   }
 
   #[test]
-  fn same_name_session() {
+  fn same_name_session() -> Result<(), &'static str> {
     let mut greeter = Greeter::default();
     greeter.session_source = SessionSource::Session(1);
 
@@ -287,11 +294,12 @@ mod test {
       ],
     };
 
-    let session = Session::get_selected(&greeter);
+    let session = Session::get_selected(&greeter)
+      .ok_or("the selected session must be found")?;
 
-    assert!(session.is_some());
-    assert_eq!(session.unwrap().name, "Session");
-    assert_eq!(session.unwrap().session_type, SessionType::X11);
-    assert_eq!(session.unwrap().command, "Session2Cmd");
+    assert_eq!(session.name, "Session");
+    assert_eq!(session.session_type, SessionType::X11);
+    assert_eq!(session.command, "Session2Cmd");
+    Ok(())
   }
 }
